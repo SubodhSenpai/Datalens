@@ -10,6 +10,7 @@ import ResultsPanel from "@/components/ResultsPanel";
 import SessionBadge from "@/components/SessionBadge";
 import ChartEvalPanel from "@/components/ChartEvalPanel";
 import DataDictionaryPanel from "@/components/DataDictionaryPanel";
+import ApiKeySettings, { loadStoredApiKey } from "@/components/ApiKeySettings";
 import { DatasetFile, QueryResult, Session } from "@/lib/types";
 import { generateSessionId } from "@/lib/utils";
 
@@ -21,6 +22,7 @@ export default function DashboardPage() {
   const [isQuerying, setIsQuerying] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
+  const [apiKey, setApiKey] = useState(() => loadStoredApiKey());
 
   const handleFilesUploaded = useCallback((newDatasets: DatasetFile[]) => {
     setSession(prev => {
@@ -51,7 +53,7 @@ export default function DashboardPage() {
       const res = await fetch("/api/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: session.id, question, datasetIds: selectedIds }),
+        body: JSON.stringify({ sessionId: session.id, question, datasetIds: selectedIds, apiKey: apiKey || undefined }),
       });
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const data = await res.json();
@@ -62,7 +64,7 @@ export default function DashboardPage() {
     } finally {
       setIsQuerying(false);
     }
-  }, [session]);
+  }, [session, apiKey]);
 
   const hasDatasets = (session?.datasets.length ?? 0) > 0;
 
@@ -81,6 +83,9 @@ export default function DashboardPage() {
             <span className="text-lg font-display font-bold tracking-tight">DataLens</span>
           </Link>
         </div>
+
+        {/* Bring-your-own API key */}
+        <ApiKeySettings value={apiKey} onChange={setApiKey} />
 
         {/* Session Badge */}
         {session && <SessionBadge session={session} />}

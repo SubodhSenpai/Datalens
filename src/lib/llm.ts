@@ -30,7 +30,14 @@ const MODEL_CHAIN = [MODEL, ...FALLBACK_MODELS];
 // gets its own independent rate-limit bucket, so cycling through them on a
 // 429 is a real way to dodge shared-pool congestion, not just a retry in
 // disguise.
-function getClients(): OpenAI[] {
+//
+// A deployment with no server-side key committed (so every visitor brings
+// their own) passes `userApiKey` — sent by the client per-request, never
+// persisted server-side — which is used EXCLUSIVELY instead of any env keys,
+// so it's unambiguous whose credits/rate limits a query is spending.
+function getClients(userApiKey?: string): OpenAI[] {
+  if (userApiKey) return [new OpenAI({ apiKey: userApiKey, baseURL: "https://openrouter.ai/api/v1" })];
+
   const keys = [process.env.OPENROUTER_API_KEY];
   for (let i = 2; ; i++) {
     const key = process.env[`OPENROUTER_API_KEY${i}`];
@@ -136,9 +143,10 @@ export async function planQuery(
   question: string,
   datasets: DatasetSchemaContext[],
   relationships: RelationshipRecord[],
-  ambiguities: AmbiguityWarning[] = []
+  ambiguities: AmbiguityWarning[] = [],
+  userApiKey?: string
 ): Promise<QueryPlan> {
-  const clients = getClients();
+  const clients = getClients(userApiKey);
   if (clients.length === 0) return heuristicPlan(question, datasets, relationships);
 
   const schemaContext = datasets.map((d) => ({
@@ -217,9 +225,10 @@ export async function explainResults(
   resultRows: Record<string, unknown>[],
   columns: string[],
   correlation?: { columnX: string; columnY: string; coefficient: number; sampleSize: number; interpretation: string },
-  unsupportedConcepts: string[] = []
+  unsupportedConcepts: string[] = [],
+  userApiKey?: string
 ): Promise<{ explanation: string; followUpSuggestions: string[] }> {
-  const clients = getClients();
+  const clients = getClients(userApiKey);
   if (clients.length === 0) return heuristicExplanation(question, resultRows, columns);
 
   const system = `You explain data query results in plain English for a business user. Output ONLY a JSON object: { "explanation": string, "followUpSuggestions": string[] }. Keep the explanation to 2-4 sentences, reference concrete numbers from the data, and suggest 2-3 natural follow-up questions.

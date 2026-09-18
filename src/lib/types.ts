@@ -210,6 +210,8 @@ export interface QueryRequest {
   sessionId: string;
   question: string;
   datasetIds: string[];
+  /** User-supplied OpenRouter API key (bring-your-own-key mode). Never persisted server-side. */
+  apiKey?: string;
 }
 
 export interface QueryResponse {

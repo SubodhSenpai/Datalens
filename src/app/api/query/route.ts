@@ -27,7 +27,7 @@ function materialRepairNotes(repairs: PlanRepair[]): string[] {
  */
 export async function POST(req: NextRequest) {
   const body = (await req.json()) as QueryRequest;
-  const { sessionId, question, datasetIds } = body;
+  const { sessionId, question, datasetIds, apiKey } = body;
 
   if (!sessionId || !question || !datasetIds?.length) {
     return NextResponse.json({ error: "sessionId, question, and datasetIds are required" }, { status: 400 });
@@ -54,7 +54,8 @@ export async function POST(req: NextRequest) {
       question,
       selected.map((d) => ({ id: d.id, name: d.name, rowCount: d.rowCount, columns: d.columns })),
       session.relationships,
-      preAmbiguity
+      preAmbiguity,
+      apiKey
     );
 
     // A small open-weight planner slips in predictable ways (join key that
@@ -209,7 +210,8 @@ export async function POST(req: NextRequest) {
       execution.rows,
       execution.columns,
       execution.correlation,
-      conceptWarnings.map((w) => w.message)
+      conceptWarnings.map((w) => w.message),
+      apiKey
     );
 
     const chartData: ChartDataPoint[] | undefined =

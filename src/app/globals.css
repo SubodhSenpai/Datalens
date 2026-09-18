@@ -1,0 +1,217 @@
+@import "tailwindcss";
+
+/* ── Design tokens: warm cream + hard-outline "poster" look ─────────────── */
+@theme {
+  --color-bg-base:      #F3EEE0;
+  --color-bg-surface:   #FAF6EC;
+  --color-bg-card:      #FFFDF7;
+  --color-bg-input:     #FFFDF7;
+
+  --color-ink:          #1B1A15;
+  --color-ink-soft:     #4A4739;
+
+  --color-sage:         #A8C29A;
+  --color-sage-dark:    #6E8F63;
+  --color-mint:         #CFE9DC;
+  --color-mustard:      #F2C744;
+  --color-mustard-dark: #C79B1E;
+  --color-terracotta:   #E4785B;
+  --color-navy:         #232C42;
+  --color-sky:          #A9CBE0;
+
+  --color-text-primary:   #1B1A15;
+  --color-text-secondary: #6B6656;
+  --color-text-muted:     #9C9682;
+
+  --color-border: #1B1A15;
+
+  --font-sans: var(--font-jakarta), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-baloo), var(--font-sans);
+
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 22px;
+  --radius-xl: 30px;
+
+  --shadow-hard-sm: 3px 3px 0 var(--color-ink);
+  --shadow-hard:    5px 5px 0 var(--color-ink);
+  --shadow-hard-lg: 8px 8px 0 var(--color-ink);
+
+  --animate-fade-in:     fadeIn 0.4s ease forwards;
+  --animate-scale-in:    fadeInScale 0.3s ease forwards;
+  --animate-float:       float 3s ease-in-out infinite;
+  --animate-wiggle:      wiggle 2.5s ease-in-out infinite;
+  --animate-spin-slow:   spin 0.7s linear infinite;
+  --animate-shimmer:     shimmer 1.5s infinite;
+}
+
+/* ── Keyframes ──────────────────────────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeInScale {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes float {
+  0%, 100% { transform: translateY(0) rotate(-2deg); }
+  50%       { transform: translateY(-6px) rotate(2deg); }
+}
+@keyframes wiggle {
+  0%, 100% { transform: rotate(-1.5deg); }
+  50%      { transform: rotate(1.5deg); }
+}
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+
+/* ── Base resets ────────────────────────────────────────────────────────── */
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--color-bg-base);
+    background-image:
+      radial-gradient(circle at 1px 1px, rgba(27,26,21,0.07) 1px, transparent 0);
+    background-size: 22px 22px;
+    color: var(--color-text-primary);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  h1,h2,h3,h4,h5,h6 {
+    font-family: var(--font-display);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    line-height: 1.05;
+  }
+
+  a { color: var(--color-ink); text-decoration: none; }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--color-ink); border-radius: 999px; border: 2px solid var(--color-bg-base); }
+}
+
+/* ── Reusable component classes ─────────────────────────────────────────── */
+@layer components {
+
+  /* Flat, thick-outlined card with a hard offset shadow — the anti-glass look */
+  .glass-card {
+    background: var(--color-bg-card);
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-hard-sm);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  .glass-card:hover {
+    transform: translate(-1px, -1px);
+    box-shadow: var(--shadow-hard);
+  }
+
+  /* Primary button — mustard pill, hard shadow */
+  .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    background: var(--color-mustard);
+    color: var(--color-ink);
+    border: 2px solid var(--color-ink);
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    box-shadow: var(--shadow-hard-sm);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  .btn-primary:hover:not(:disabled) {
+    transform: translate(-2px, -2px);
+    box-shadow: var(--shadow-hard);
+  }
+  .btn-primary:active:not(:disabled) { transform: translate(0, 0); box-shadow: 1px 1px 0 var(--color-ink); }
+  .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
+
+  /* Secondary button — white pill, thick outline */
+  .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    background: var(--color-bg-card);
+    color: var(--color-ink);
+    border: 2px solid var(--color-border);
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  .btn-secondary:hover {
+    transform: translate(-1px, -1px);
+    box-shadow: var(--shadow-hard-sm);
+  }
+
+  /* Ghost button — text-only, minimal */
+  .btn-ghost {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: transparent;
+    color: var(--color-text-secondary);
+    border: none;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .btn-ghost:hover {
+    background: var(--color-ink);
+    color: var(--color-bg-base);
+  }
+  .btn-ghost:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Badges — flat pills, thin ink border */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    border: 1.5px solid var(--color-border);
+  }
+  .badge-indigo  { background: var(--color-sky);       color: var(--color-ink); }
+  .badge-cyan    { background: var(--color-mint);      color: var(--color-ink); }
+  .badge-emerald { background: var(--color-sage);      color: var(--color-ink); }
+  .badge-amber   { background: var(--color-mustard);   color: var(--color-ink); }
+  .badge-red     { background: var(--color-terracotta);color: var(--color-ink); }
+
+  /* Spinner */
+  .spinner {
+    width: 20px;
+    height: 20px;
+    border: 3px solid var(--color-border);
+    border-top-color: var(--color-mustard);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+
+  /* Skeleton */
+  .skeleton {
+    background: linear-gradient(90deg, #EAE4D2 25%, #F6F1E4 50%, #EAE4D2 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    border-radius: 6px;
+  }
+}

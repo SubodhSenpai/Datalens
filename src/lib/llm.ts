@@ -179,18 +179,31 @@ export async function planQuery(
     return heuristicPlan(question, datasets, relationships);
   }
 
+  // Datasets are identified to the model BY NAME, not by their internal
+  // random id. Copying "ds_3sgmoki33is" correctly out of a dozen lookalike
+  // random strings is a real failure mode — observed the model name the
+  // right table in its own "reasoning" while pointing datasetId at a
+  // different one. A filename is meaningful, so a slip is both less likely
+  // and recoverable by fuzzy-matching downstream.
   const schemaContext = datasets.map((d) => ({
-    id: d.id,
-    name: d.name,
+    dataset: d.name,
     rowCount: d.rowCount,
     columns: d.columns.map((c) => ({ name: c.name, type: c.type })),
+  }));
+  const relationshipContext = relationships.map((r) => ({
+    datasetA: datasets.find((d) => d.id === r.datasetIdA)?.name ?? r.datasetIdA,
+    columnA: r.columnA,
+    datasetB: datasets.find((d) => d.id === r.datasetIdB)?.name ?? r.datasetIdB,
+    columnB: r.columnB,
+    basis: r.basis,
+    confidence: r.confidence,
   }));
 
   const system = `You are a query planner for a tabular data analysis tool. Given a user's natural-language question and the schema of one or more datasets (plus detected column relationships between them), output ONLY a JSON object (no markdown, no prose) matching this TypeScript type:
 
 type QueryPlan = {
-  datasetId: string;            // id of the base dataset from the list given
-  joins?: { datasetId: string; on?: string; leftOn?: string; rightOn?: string; type?: "inner"|"left" }[]; // use when the question needs data from more than one dataset. Use "on" ONLY when both datasets name the join column identically. If a relationship below has different columnA/columnB names (e.g. matched by value overlap, not name), you MUST use leftOn (the base dataset's column name) + rightOn (the joined dataset's column name) instead — do not invent a column name that doesn't exist in one of the datasets, that silently produces garbage results. A question can need data from a THIRD dataset that has no direct relationship to the base — e.g. base is an orders table with only a store id, and the question wants a "region name" that lives in a regions table connected only through a stores table. In that case list BOTH joins: one from the base to the intermediate dataset, then one from the intermediate dataset's key to the third dataset (leftOn/rightOn can reference a column that only exists after the FIRST join has been applied).
+  datasetId: string;            // the NAME of the base dataset, copied EXACTLY as it appears in the "dataset" field of the list below (e.g. "payroll.xlsx — Payroll_2025"). Never invent a name, and never use a name that isn't in the list. The base dataset MUST be the one that actually contains the main number the question asks for — if the question asks for a total of some column, the base is the dataset holding that column, not a different dataset that merely relates to it.
+  joins?: { datasetId: string; on?: string; leftOn?: string; rightOn?: string; type?: "inner"|"left" }[]; // datasetId here is also the joined dataset's NAME, copied exactly. Use when the question needs data from more than one dataset. Use "on" ONLY when both datasets name the join column identically. If a relationship below has different columnA/columnB names (e.g. matched by value overlap, not name), you MUST use leftOn (the base dataset's column name) + rightOn (the joined dataset's column name) instead — do not invent a column name that doesn't exist in one of the datasets, that silently produces garbage results. A question can need data from a THIRD dataset that has no direct relationship to the base — e.g. base is an orders table with only a store id, and the question wants a "region name" that lives in a regions table connected only through a stores table. In that case list BOTH joins: one from the base to the intermediate dataset, then one from the intermediate dataset's key to the third dataset (leftOn/rightOn can reference a column that only exists after the FIRST join has been applied).
   derive?: { as: string; expr: string }[]; // computed row-level columns, evaluated before filters/groupBy/aggregations. expr is ARITHMETIC ONLY over existing numeric column names: + - * / ( ) and number literals — no functions, no strings. Use this whenever the question needs a value that isn't already a literal column but is a straightforward formula over ones that exist, e.g. "revenue" from quantity/unit_price/discount_pct, or "profit" from a revenue-like derive minus a cost column. Never invent a number outside this expression grammar.
   select?: string[];            // columns to include in the output, omit for all
   filters?: { column: string; op: "eq"|"neq"|"gt"|"gte"|"lt"|"lte"|"contains"; value: string|number|boolean }[];
@@ -211,10 +224,10 @@ A question comparing multiple values of the SAME column ("active vs exited", "B2
 Only reference columns that exist in the given schema (post-join, joined-in columns keep their original name unless it collides with a base column, in which case it's prefixed with "<joinedDatasetName>_"). Pick sensible defaults: totals/averages/counts always need an "aggregations" entry (never leave a "total"/"average" question as an unaggregated row dump); "by <dimension>" or "each <dimension>" implies groupBy; "top/bottom N" implies sort+limit; chartType "none" only for a single scalar answer. Chart choice: bar for comparing a handful of categories, dot instead of bar when there are more than ~12 categories, line for trends over time, area for cumulative/running totals over time, pie for a proportion breakdown of 5 or fewer categories, treemap for a proportion breakdown of 6+ categories, histogram for the distribution of one numeric column, scatter for the relationship between two numeric columns (pair with "correlate"), radar for comparing several metrics across a few entities, heatmap for a value across two categorical dimensions at once.
 
 For a trend/time-series question, you MUST bucket the date column with dateBucket before grouping by it — never groupBy a raw date column directly, since every row has a distinct timestamp and that produces one group per row instead of a real trend. Example: question "show the monthly revenue trend", dataset has date column "order_date" and numeric column "amount":
-{"datasetId":"<id>","dateBucket":{"column":"order_date","granularity":"month","as":"order_date_month"},"groupBy":["order_date_month"],"aggregations":[{"column":"amount","fn":"sum","as":"total_amount"}],"sort":[{"column":"order_date_month","direction":"asc"}],"chartType":"line","chartX":"order_date_month","chartY":["total_amount"]}
+{"datasetId":"orders.csv","dateBucket":{"column":"order_date","granularity":"month","as":"order_date_month"},"groupBy":["order_date_month"],"aggregations":[{"column":"amount","fn":"sum","as":"total_amount"}],"sort":[{"column":"order_date_month","direction":"asc"}],"chartType":"line","chartX":"order_date_month","chartY":["total_amount"]}
 
 "Top/bottom N" questions come in two different shapes — do not confuse them:
-1. "Top N <rows> by <column>" (the rows themselves are already what's being ranked, e.g. "top 10 products by unit price") needs ONLY select+sort+limit — no "aggregations" and no "groupBy" at all, since there is nothing to summarize, just rows to rank and truncate: {"datasetId":"<id>","select":["product_name","unit_price"],"sort":[{"column":"unit_price","direction":"desc"}],"limit":10,"chartType":"bar","chartX":"product_name","chartY":["unit_price"]}
+1. "Top N <rows> by <column>" (the rows themselves are already what's being ranked, e.g. "top 10 products by unit price") needs ONLY select+sort+limit — no "aggregations" and no "groupBy" at all, since there is nothing to summarize, just rows to rank and truncate: {"datasetId":"products.csv","select":["product_name","unit_price"],"sort":[{"column":"unit_price","direction":"desc"}],"limit":10,"chartType":"bar","chartX":"product_name","chartY":["unit_price"]}
 2. "Top N <categories> by <measure>" (ranking groups by a computed summary, e.g. "top 10 categories by total revenue") needs groupBy+aggregations+sort+limit together. Adding "aggregations" without "groupBy" collapses ALL rows into a single summary row — never do that for a per-row ranking question, it silently turns a 10-row answer into 1.
 
 If a dataset has columns like "quantity", "unit_price" and "discount_pct" (as a percentage, e.g. 10 meaning 10%) but no literal "revenue"/"total_amount"/"sales" column, "total revenue" means derive it first: {"derive":[{"as":"revenue","expr":"quantity * unit_price * (1 - discount_pct / 100)"}],"aggregations":[{"column":"revenue","fn":"sum","as":"total_revenue"}]}. Do the same for any other value the question names that is clearly a simple formula over existing numeric columns rather than typing a bare aggregation over a column that doesn't exist.
@@ -222,7 +235,7 @@ If a dataset has columns like "quantity", "unit_price" and "discount_pct" (as a 
 For a cross-dataset question, check the Relationships list below first — each entry gives columnA (in datasetIdA) and columnB (in datasetIdB) plus how it was detected ("name" = identical column names; "value-overlap" = the column names differ but their actual values substantially overlap, e.g. a "country" column and a "nation" column both containing the same country names). Only join on a relationship that's actually listed; if no relationship connects the datasets you need, say so in "reasoning" and answer from the single dataset you can, rather than guessing a join key.
 
 Three-dataset example — this pattern applies whenever the value you need to group by lives TWO joins away from the base dataset, regardless of what the datasets are actually called: base "orders" (columns order_id, amount, store_id) needs to be broken down by "region name", which only exists in "regions" (region_id, region_name) — and orders has no region_id at all, only "stores" (store_id, region_id) connects the two:
-{"datasetId":"<orders id>","joins":[{"datasetId":"<stores id>","on":"store_id"},{"datasetId":"<regions id>","on":"region_id"}],"groupBy":["region_name"],"aggregations":[{"column":"amount","fn":"sum","as":"total_amount"}],"chartType":"bar","chartX":"region_name","chartY":["total_amount"]}
+{"datasetId":"orders.csv","joins":[{"datasetId":"stores.csv","on":"store_id"},{"datasetId":"regions.csv","on":"region_id"}],"groupBy":["region_name"],"aggregations":[{"column":"amount","fn":"sum","as":"total_amount"}],"chartType":"bar","chartX":"region_name","chartY":["total_amount"]}
 Do NOT join a dataset that the question doesn't actually need data from, even if a relationship to it exists — an extra join multiplies every row (and every sum) by however many matching rows it adds. Only include a join whose columns you will actually filter/groupBy/aggregate/select/chart by.
 
 This system only aggregates and summarizes data that already exists — it has no forecasting, prediction, or trend-extrapolation capability. If asked to predict, forecast, or project a future value, do NOT invent one: plan the closest honest historical answer instead (e.g. the actual past trend), never name an aggregation "predicted_x"/"forecast_x", and use "reasoning" to note that forecasting isn't supported so the explanation reflects that limitation rather than presenting a fabricated number as a real prediction.`;
@@ -232,7 +245,7 @@ This system only aggregates and summarizes data that already exists — it has n
         .map((a) => `- "${a.concept}": ${a.candidates.map((c) => `"${c.column}" (${c.datasetName})`).join(" or ")}`)
         .join("\n")}\nPick the one that most literally matches the question, and say which one you picked (and that alternatives exist) in "reasoning".`
     : "";
-  const userMessage = `Datasets:\n${JSON.stringify(schemaContext, null, 2)}\n\nRelationships:\n${JSON.stringify(relationships, null, 2)}${ambiguityLine}\n\nQuestion: ${question}`;
+  const userMessage = `Datasets:\n${JSON.stringify(schemaContext, null, 2)}\n\nRelationships:\n${JSON.stringify(relationshipContext, null, 2)}${ambiguityLine}\n\nQuestion: ${question}`;
 
   if (trace) {
     trace.systemPrompt = system;

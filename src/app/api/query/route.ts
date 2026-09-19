@@ -5,7 +5,7 @@ import { planQuery, explainResults, LlmCallTrace } from "@/lib/llm";
 import { planToPandas } from "@/lib/pandas-codegen";
 import { executeQueryPlan, joinRows, JoinKeyMissingError } from "@/lib/query-engine";
 import { evaluateChartChoice } from "@/lib/chart-eval";
-import { validateAndRepairPlan, injectMissingValueFilters, correctHallucinatedDateFilterYear, normalizeMonthNameFilters, dropUnsatisfiableRangeFilters, PlanRepair } from "@/lib/plan-validator";
+import { validateAndRepairPlan, injectMissingValueFilters, correctHallucinatedDateFilterYear, resolveTimeFilters, dropUnsatisfiableRangeFilters, PlanRepair } from "@/lib/plan-validator";
 import { detectUnsupportedConcepts, stripMisleadingAliases } from "@/lib/concept-guard";
 import { detectColumnAmbiguity } from "@/lib/data-dictionary";
 
@@ -189,9 +189,9 @@ export async function POST(req: NextRequest) {
     Object.assign(plan, withDateYears.plan);
     repairs.push(...withDateYears.repairs);
 
-    const withMonthNames = normalizeMonthNameFilters(plan, workingRows);
-    Object.assign(plan, withMonthNames.plan);
-    repairs.push(...withMonthNames.repairs);
+    const withTimeFilters = resolveTimeFilters(plan, question, workingRows);
+    Object.assign(plan, withTimeFilters.plan);
+    repairs.push(...withTimeFilters.repairs);
 
     const withRangeFilters = dropUnsatisfiableRangeFilters(plan, workingRows);
     Object.assign(plan, withRangeFilters.plan);

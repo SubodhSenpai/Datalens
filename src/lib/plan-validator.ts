@@ -42,6 +42,14 @@ export function validateAndRepairPlan(
 
   const byId = new Map(datasets.map((d) => [d.id, d]));
 
+  // ── 0. Resolve dataset references (the planner names them, not ids) ─────
+  const resolvedBase = resolveDatasetRef(repaired.datasetId, datasets);
+  if (resolvedBase && resolvedBase.id !== repaired.datasetId) repaired.datasetId = resolvedBase.id;
+  for (const join of repaired.joins ?? []) {
+    const resolvedJoin = resolveDatasetRef(join.datasetId, datasets);
+    if (resolvedJoin) join.datasetId = resolvedJoin.id;
+  }
+
   // ── 1. Base dataset must exist ──────────────────────────────────────────
   if (!byId.has(repaired.datasetId)) {
     const fallback = pickBestDataset(question, datasets);
@@ -50,6 +58,31 @@ export function validateAndRepairPlan(
       repaired.datasetId = fallback.id;
     }
   }
+
+  // ── 1b. Re-base when the chosen dataset holds NOTHING the plan uses ─────
+  // The strongest signal of a mis-picked base: not one column the plan
+  // references exists in it. Joining the real table in (the old behavior)
+  // "works" but silently rescopes the question to whatever rows the wrong
+  // base happens to contain — e.g. a 10-row file joined to payroll answers
+  // "total net pay" for 10 people and looks entirely plausible. Switching
+  // the base instead is both correct and visible.
+  {
+    const chosen = byId.get(repaired.datasetId);
+    if (chosen) {
+      const rebase = findBetterBase(repaired, chosen, datasets);
+      if (rebase) {
+        repairs.push({
+          field: "datasetId",
+          detail: `Base dataset "${chosen.name}" contains none of the columns this plan uses (${rebase.missing.join(", ")}) → re-based onto "${rebase.dataset.name}", which has them. Joining instead would have silently narrowed the answer to only the rows "${chosen.name}" happens to contain.`,
+        });
+        repaired.datasetId = rebase.dataset.id;
+        // Any join the plan had was built around the wrong base; drop those
+        // rather than carry a now-meaningless join chain forward.
+        if (repaired.joins?.some((j) => j.datasetId === rebase.dataset.id)) repaired.joins = undefined;
+      }
+    }
+  }
+
   const base = byId.get(repaired.datasetId);
   if (!base) return { plan: repaired, repairs, predictedColumns: [] };
 
@@ -474,45 +507,105 @@ export function correctHallucinatedDateFilterYear(
 const MONTH_NAMES = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 const YEAR_MONTH_CELL = /^\d{4}-\d{2}$/;
 
+/** The time period a question names, if any ("March 2025" → 2025-03). */
+function parseQuestionPeriod(question: string): { year?: string; monthIdx?: number } | undefined {
+  const lower = question.toLowerCase();
+  const monthIdx = MONTH_NAMES.findIndex((m) => new RegExp(`\\b${m}\\b`).test(lower));
+  const year = lower.match(/\b(19|20)\d{2}\b/)?.[0];
+  if (monthIdx === -1 && !year) return undefined;
+  return { year, monthIdx: monthIdx === -1 ? undefined : monthIdx };
+}
+
+// "since 2020", "2023 or later", "before March" describe an OPEN-ENDED
+// period — pinning them to one bounded month/year would answer a narrower
+// question than the one asked, so period injection stays out of it.
+const OPEN_ENDED_PERIOD = /\b(or later|onwards?|since|after|before|until|up to|prior to|from)\b/i;
+
 /**
- * A "month" column is sometimes stored as "2025-03" rather than a full ISO
- * date — the planner names it in human words instead ("March 2025", "March")
- * because that's how the question phrased it, and an "eq"/"neq" comparison
- * against that literal text can never match "2025-03". Recognize the common
- * "<Month> [<Year>]" shape and rewrite it into the column's actual format;
- * a missing year falls back to whichever single year the column actually
- * spans (same reasoning as the date-year correction above).
+ * Aligns a question's stated time period with the column that actually
+ * stores it. Handles three failures seen in real traces, all of which
+ * otherwise produce a confidently wrong number:
+ *
+ *  1. The planner writes the period the way the QUESTION phrased it
+ *     ("March 2025", or a bare 3) against a column holding "2025-03" —
+ *     an eq that can never match, silently returning nothing.
+ *  2. The planner drops the period filter entirely (often because an
+ *     earlier repair removed a malformed one), leaving an unfiltered total
+ *     presented as if it answered "in March 2025".
+ *  3. The period is right but the column is a full ISO date, needing a
+ *     range rather than an equality.
+ *
+ * Deliberately conservative: it never touches an existing gte/lte/gt/lt
+ * (those are already a correctly-shaped range, e.g. "joined in 2023 or
+ * later"), and never fires for open-ended phrasing.
  */
-export function normalizeMonthNameFilters(
+export function resolveTimeFilters(
   plan: QueryPlan,
+  question: string,
   rows: Record<string, unknown>[]
 ): { plan: QueryPlan; repairs: PlanRepair[] } {
   const repairs: PlanRepair[] = [];
-  if (!plan.filters?.length || rows.length === 0) return { plan, repairs };
+  if (rows.length === 0) return { plan, repairs };
 
-  const filters = plan.filters.map((f) => {
-    if (!["eq", "neq"].includes(f.op) || typeof f.value !== "string") return f;
+  const period = parseQuestionPeriod(question);
+  if (!period) return { plan, repairs };
 
-    const sample = rows.find((r) => typeof r[f.column] === "string" && YEAR_MONTH_CELL.test(r[f.column] as string));
-    if (!sample) return f; // not a "YYYY-MM" shaped column
+  // Which column actually stores a period, and in what shape?
+  const sampleRow = rows.find((r) => Object.values(r).some((v) => typeof v === "string")) ?? rows[0];
+  let column: string | undefined;
+  let shape: "year-month" | "iso-date" | undefined;
+  for (const key of Object.keys(sampleRow)) {
+    const value = rows.find((r) => typeof r[key] === "string")?.[key];
+    if (typeof value !== "string") continue;
+    if (YEAR_MONTH_CELL.test(value)) { column = key; shape = "year-month"; break; }
+    if (ISO_DATE_CELL.test(value) && !column) { column = key; shape = "iso-date"; }
+  }
+  if (!column || !shape) return { plan, repairs };
 
-    const lower = f.value.toLowerCase();
-    const monthIdx = MONTH_NAMES.findIndex((m) => lower.includes(m));
-    if (monthIdx === -1) return f;
-    const yearMatch = lower.match(/\b(20\d{2})\b/);
+  // An existing range filter is already the right shape — leave it be.
+  const existing = (plan.filters ?? []).filter((f) => f.column === column);
+  if (existing.some((f) => ["gt", "gte", "lt", "lte"].includes(f.op))) return { plan, repairs };
 
-    const actualYears = new Set(
-      rows.map((r) => (typeof r[f.column] === "string" ? (r[f.column] as string).slice(0, 4) : null)).filter((y): y is string => y !== null)
-    );
-    const year = yearMatch?.[1] ?? (actualYears.size === 1 ? Array.from(actualYears)[0] : undefined);
-    if (!year) return f;
+  const actualYears = new Set(
+    rows.map((r) => (typeof r[column!] === "string" ? (r[column!] as string).slice(0, 4) : null)).filter((y): y is string => y !== null)
+  );
+  const year = period.year ?? (actualYears.size === 1 ? Array.from(actualYears)[0] : undefined);
+  if (!year) return { plan, repairs };
 
-    const newValue = `${year}-${String(monthIdx + 1).padStart(2, "0")}`;
-    repairs.push({ field: "filters", detail: `Filter on "${f.column}" used "${f.value}", but the column stores months as "YYYY-MM" → corrected to "${newValue}".` });
-    return { ...f, value: newValue };
+  // An eq filter that DOES match real values is already correct.
+  const equality = existing.find((f) => f.op === "eq");
+  if (equality && rows.some((r) => String(r[column!]) === String(equality.value))) return { plan, repairs };
+  if (!equality && OPEN_ENDED_PERIOD.test(question)) return { plan, repairs };
+
+  const others = (plan.filters ?? []).filter((f) => f.column !== column);
+  const month = period.monthIdx !== undefined ? String(period.monthIdx + 1).padStart(2, "0") : undefined;
+
+  let injected: NonNullable<QueryPlan["filters"]>;
+  let describe: string;
+  if (shape === "year-month") {
+    injected = month
+      ? [{ column, op: "eq", value: `${year}-${month}` }]
+      : [{ column, op: "gte", value: `${year}-01` }, { column, op: "lte", value: `${year}-12` }];
+    describe = month ? `${column} = "${year}-${month}"` : `${column} within ${year}`;
+  } else {
+    const lastDay = month ? new Date(Number(year), Number(month), 0).getDate() : 31;
+    injected = month
+      ? [
+          { column, op: "gte", value: `${year}-${month}-01` },
+          { column, op: "lte", value: `${year}-${month}-${String(lastDay).padStart(2, "0")}` },
+        ]
+      : [{ column, op: "gte", value: `${year}-01-01` }, { column, op: "lte", value: `${year}-12-31` }];
+    describe = month ? `${column} within ${year}-${month}` : `${column} within ${year}`;
+  }
+
+  repairs.push({
+    field: "filters",
+    detail: equality
+      ? `Filter "${column} eq ${JSON.stringify(equality.value)}" matches no value in this column (it stores ${shape === "year-month" ? `"YYYY-MM"` : "full dates"}) → replaced with ${describe}, the period the question names.`
+      : `The question names a time period but the plan had no filter for it → added ${describe}, so the total covers only that period rather than every row.`,
   });
 
-  return { plan: { ...plan, filters }, repairs };
+  return { plan: { ...plan, filters: [...others, ...injected] }, repairs };
 }
 
 /**
@@ -631,6 +724,81 @@ function autoIncludeDatasetWithColumn(
     return col;
   }
   return undefined;
+}
+
+const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/**
+ * The planner refers to datasets by NAME (ids are opaque random strings it
+ * gets wrong). Accepts an id too, so older/heuristic plans keep working,
+ * then falls back through progressively looser name matching.
+ */
+function resolveDatasetRef(ref: string | undefined, datasets: ValidatorDataset[]): ValidatorDataset | undefined {
+  if (!ref) return undefined;
+  const byId = datasets.find((d) => d.id === ref);
+  if (byId) return byId;
+
+  const exact = datasets.find((d) => d.name === ref);
+  if (exact) return exact;
+
+  const ci = datasets.find((d) => d.name.toLowerCase() === ref.toLowerCase().trim());
+  if (ci) return ci;
+
+  const loose = datasets.find((d) => normalize(d.name) === normalize(ref));
+  if (loose) return loose;
+
+  // "payroll.xlsx" when the datasets are "payroll.xlsx — Payroll_2025" and
+  // "payroll.xlsx — Bonus": only accept it if exactly one candidate matches,
+  // so an ambiguous prefix isn't silently resolved to the wrong sheet.
+  const partial = datasets.filter(
+    (d) => normalize(d.name).includes(normalize(ref)) || normalize(ref).includes(normalize(d.name))
+  );
+  return partial.length === 1 ? partial[0] : undefined;
+}
+
+/** Every column name the plan actually references, anywhere. */
+function referencedColumns(plan: QueryPlan): string[] {
+  return [
+    ...(plan.aggregations ?? []).filter((a) => a.fn !== "count").map((a) => a.column),
+    ...(plan.groupBy ?? []),
+    ...(plan.filters ?? []).map((f) => f.column),
+    ...(plan.select ?? []),
+    ...(plan.derive ?? []).flatMap((d) => d.expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []),
+    ...(plan.correlate ? [plan.correlate.columnX, plan.correlate.columnY] : []),
+    ...(plan.dateBucket ? [plan.dateBucket.column] : []),
+  ].filter(Boolean);
+}
+
+/**
+ * Detects a mis-picked base dataset and names the one that should have been
+ * used. Deliberately strict: it only fires when the base contributes NOTHING
+ * (not a single referenced column), which is the unambiguous signature of
+ * the planner copying the wrong dataset reference. A legitimate fact-table
+ * base always contributes at least its measure column, so the normal
+ * "base + lookup joins" shape is never touched.
+ */
+function findBetterBase(
+  plan: QueryPlan,
+  base: ValidatorDataset,
+  datasets: ValidatorDataset[]
+): { dataset: ValidatorDataset; missing: string[] } | undefined {
+  const referenced = Array.from(new Set(referencedColumns(plan)));
+  if (referenced.length === 0) return undefined;
+
+  const hasColumn = (d: ValidatorDataset, name: string) => Boolean(resolveColumn(name, d.columns));
+  const fromBase = referenced.filter((c) => hasColumn(base, c));
+  if (fromBase.length > 0) return undefined; // base contributes → leave it alone
+
+  const scored = datasets
+    .filter((d) => d.id !== base.id)
+    .map((d) => ({ dataset: d, hits: referenced.filter((c) => hasColumn(d, c)).length }))
+    .filter((x) => x.hits > 0)
+    .sort((a, b) => b.hits - a.hits);
+
+  if (scored.length === 0) return undefined;
+  // Require a clear winner, so an arbitrary pick isn't made between ties.
+  if (scored.length > 1 && scored[0].hits === scored[1].hits) return undefined;
+  return { dataset: scored[0].dataset, missing: referenced };
 }
 
 function resolveColumn(name: string | undefined, columns: ColumnSchema[]): string | undefined {

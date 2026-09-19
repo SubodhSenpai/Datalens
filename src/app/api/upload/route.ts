@@ -29,9 +29,13 @@ export async function POST(req: NextRequest) {
 
   const session = await getOrCreateSession(sessionId);
 
-  if (session.datasets.size + files.length > MAX_FILES) {
+  // Count source FILES, not datasets — a multi-sheet workbook becomes one
+  // dataset per sheet, so counting datasets would charge a 2-sheet .xlsx
+  // twice against a limit the user reads as "10 files".
+  const existingFileCount = new Set(Array.from(session.datasets.values()).map((d) => d.blobUrl)).size;
+  if (existingFileCount + files.length > MAX_FILES) {
     return NextResponse.json(
-      { error: `Session limit is ${MAX_FILES} files (has ${session.datasets.size}, tried to add ${files.length}).` },
+      { error: `Session limit is ${MAX_FILES} files (has ${existingFileCount}, tried to add ${files.length}).` },
       { status: 400 }
     );
   }

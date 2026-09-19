@@ -27,7 +27,12 @@ export class BlobConflictError extends Error {
 
 export async function uploadFile(pathname: string, buffer: Buffer, contentType: string): Promise<string> {
   if (hasBlobToken) {
-    const blob = await put(pathname, buffer, { access: "public", contentType, addRandomSuffix: true });
+    // "private" — this stores user-uploaded data files; a public blob has a
+    // guessable/shareable URL that would let anyone with it read the raw
+    // file, bypassing the session entirely. All reads happen server-side
+    // (this app never fetches a blob URL directly from the browser), so
+    // private access costs nothing functionally.
+    const blob = await put(pathname, buffer, { access: "private", contentType, addRandomSuffix: true });
     return blob.url;
   }
   const url = `local://${pathname}`;
@@ -57,7 +62,7 @@ export async function getBlobBuffer(urlOrPathname: string): Promise<Buffer | nul
     return localBlobs.get(urlOrPathname) ?? null;
   }
   if (!hasBlobToken) return null;
-  const result = await get(urlOrPathname, { access: "public" });
+  const result = await get(urlOrPathname, { access: "private" });
   if (!result || result.statusCode !== 200) return null;
   const arrayBuffer = await new Response(result.stream).arrayBuffer();
   return Buffer.from(arrayBuffer);
@@ -80,7 +85,7 @@ export async function saveBlobJson(pathname: string, data: unknown, opts?: { eta
   if (hasBlobToken) {
     try {
       const blob = await put(pathname, buffer, {
-        access: "public",
+        access: "private",
         contentType: "application/json",
         addRandomSuffix: false,
         allowOverwrite: !opts?.etag,
@@ -110,7 +115,7 @@ export async function getBlobJson<T>(
   opts?: { ifNoneMatch?: string }
 ): Promise<BlobJsonResult<T> | "not-modified" | null> {
   if (hasBlobToken) {
-    const result = await get(pathname, { access: "public", ifNoneMatch: opts?.ifNoneMatch });
+    const result = await get(pathname, { access: "private", ifNoneMatch: opts?.ifNoneMatch });
     if (!result) return null;
     if (result.statusCode === 304) return "not-modified";
     const text = await new Response(result.stream).text();

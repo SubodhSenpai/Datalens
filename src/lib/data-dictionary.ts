@@ -29,49 +29,111 @@ export function buildDataDictionary(datasets: DictionaryDataset[]): DictionaryEn
   return Array.from(map.values()).sort((a, b) => a.column.localeCompare(b.column));
 }
 
-interface ConceptGroup {
-  concept: string;
-  term: RegExp; // matches the question
-  columnPattern: RegExp; // matches candidate column names
-}
-
-// Business terms that can honestly mean more than one column, where each
-// candidate is a real but DIFFERENT number — e.g. a company might track
-// both a yearly headline compensation figure and a separate month-by-month
-// payout figure, and "salary" could reasonably mean either. Picking either
-// without saying so answers a different question than the one asked.
-const CONCEPT_GROUPS: ConceptGroup[] = [
-  { concept: "salary/pay", term: /\bsalary|\bsalaries\b|\bpay\b|compensation|\bwage/i, columnPattern: /ctc|salary|net_pay|gross_pay|\bbasic\b|compensation|\bwage/i },
-  { concept: "revenue/amount", term: /\brevenue\b|\bsales\b(?!\s*(order|rep))|\btotal amount\b/i, columnPattern: /revenue|total_amount|sales_amount|order_value|order_amount/i },
-  { concept: "cost/price", term: /\bcost\b|\bprice\b|\bexpense/i, columnPattern: /cost_price|unit_price|expense_amount|\bcost\b/i },
-];
-
 export interface AmbiguityWarning {
   concept: string;
   candidates: { column: string; datasetName: string }[];
 }
 
-// Flags when a question's generic term ("salary") could resolve to more
-// than one DISTINCT column name across the datasets in scope — the
-// question's wording alone can't disambiguate that, so the app should say
-// which column it used rather than silently guessing one.
-export function detectColumnAmbiguity(question: string, datasets: DictionaryDataset[]): AmbiguityWarning[] {
+/**
+ * Just the part of a detected relationship this module needs — declared
+ * structurally so the dictionary doesn't have to depend on the session store.
+ */
+export interface DictionaryRelationship {
+  columnA: string;
+  columnB: string;
+}
+
+// Words that carry no column meaning, so matching on them would flag every
+// question. Purely grammatical — nothing domain-specific.
+const STOPWORDS = new Set([
+  "the", "and", "for", "are", "was", "were", "what", "which", "who", "whom", "how",
+  "many", "much", "show", "give", "list", "find", "get", "all", "any", "each", "every",
+  "total", "sum", "average", "avg", "mean", "count", "number", "top", "bottom", "highest",
+  "lowest", "most", "least", "per", "with", "without", "from", "that", "this", "these",
+  "those", "have", "has", "had", "been", "being", "there", "their", "them", "then",
+  "than", "but", "not", "did", "does", "our", "out", "across", "between", "over",
+  "under", "into", "about", "compare", "versus",
+]);
+
+const tokenize = (s: string) =>
+  s.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !STOPWORDS.has(w));
+
+/** "Emp ID", "emp_id" and "empid" are the same name. */
+const canonical = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+const MAX_WARNINGS = 4;
+
+/**
+ * Flags a question whose wording points at more than one real column, so the
+ * app can say which one it used instead of silently picking the first.
+ *
+ * Both rules below are structural — they compare the question's own words
+ * against the actual column names and their profiles. There is deliberately
+ * no list of business terms: a fixed vocabulary only ever covers the domain
+ * it was written for, and silently stops protecting every other upload.
+ */
+export function detectColumnAmbiguity(
+  question: string,
+  datasets: DictionaryDataset[],
+  relationships: DictionaryRelationship[] = []
+): AmbiguityWarning[] {
   const warnings: AmbiguityWarning[] = [];
-  for (const group of CONCEPT_GROUPS) {
-    if (!group.term.test(question)) continue;
+  const words = new Set(tokenize(question));
+
+  // Column names that two of these files genuinely join on. A detected
+  // relationship requires the values to actually overlap, so this is a far
+  // better "is it a key?" test than uniqueness — a measure column can easily
+  // be unique in every file while meaning something different in each.
+  const joinKeys = new Set<string>();
+  for (const r of relationships) {
+    if (canonical(r.columnA) === canonical(r.columnB)) joinKeys.add(canonical(r.columnA));
+  }
+
+  // ── Rule 1: one column name, several files ───────────────────────────────
+  // "amount" in orders.csv and in refunds.csv are different numbers under the
+  // same name. Whichever file ends up as the join base wins the bare name, so
+  // the plan can reference the wrong one without anything looking wrong.
+  const byName = new Map<string, { column: string; datasetName: string }[]>();
+  for (const ds of datasets) {
+    for (const col of ds.columns) {
+      const key = canonical(col.name);
+      const list = byName.get(key) ?? [];
+      list.push({ column: col.name, datasetName: ds.name });
+      byName.set(key, list);
+    }
+  }
+
+  for (const [key, entries] of byName) {
+    if (entries.length < 2) continue;
+    if (!words.has(key) && !tokenize(entries[0].column).some((w) => words.has(w))) continue;
+    // A name the files actually join on is how they relate, not a choice the
+    // question has to make.
+    if (joinKeys.has(key)) continue;
+    warnings.push({
+      concept: entries[0].column,
+      candidates: entries.map(({ column, datasetName }) => ({ column, datasetName })),
+    });
+  }
+
+  // ── Rule 2: one word, several column names ───────────────────────────────
+  // "salary" against both monthly_salary and annual_salary: each is a real
+  // but different number, and the question alone cannot choose.
+  for (const word of words) {
     const candidates = new Map<string, { column: string; datasetName: string }>();
     for (const ds of datasets) {
       for (const col of ds.columns) {
-        if (col.type === "number" && group.columnPattern.test(col.name)) {
-          candidates.set(col.name.toLowerCase(), { column: col.name, datasetName: ds.name });
+        if (col.type !== "number") continue;
+        const name = canonical(col.name);
+        // A column whose whole name IS the word is handled by Rule 1.
+        if (name !== word && name.includes(word)) {
+          candidates.set(name, { column: col.name, datasetName: ds.name });
         }
       }
     }
-    // Only flag when the candidates are genuinely different column names —
-    // the same column repeated across files (a real join key) isn't ambiguous.
-    if (new Set(Array.from(candidates.values()).map((c) => c.column.toLowerCase())).size > 1) {
-      warnings.push({ concept: group.concept, candidates: Array.from(candidates.values()) });
+    if (candidates.size > 1) {
+      warnings.push({ concept: word, candidates: Array.from(candidates.values()) });
     }
   }
-  return warnings;
+
+  return warnings.slice(0, MAX_WARNINGS);
 }

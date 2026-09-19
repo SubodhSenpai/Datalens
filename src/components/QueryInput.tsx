@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, KeyboardEvent } from "react";
+import { useState, useRef, useMemo, KeyboardEvent } from "react";
 import { Send, ChevronDown, Database, Sparkles } from "lucide-react";
 import { DatasetFile } from "@/lib/types";
 
@@ -19,7 +19,17 @@ const EXAMPLE_QUESTIONS = [
 
 export default function QueryInput({ datasets, isQuerying, onQuery }: QueryInputProps) {
   const [question, setQuestion]             = useState("");
-  const [selectedIds, setSelectedIds]       = useState<string[]>(() => datasets.map(d => d.id));
+  // Tracked as what the user has UNticked, not what's ticked. A ticked list
+  // seeded on first render never learns about files uploaded afterwards, so
+  // those sat silently out of scope: a question about a later upload was
+  // answered from the earlier files only. Deriving the selection from the
+  // live dataset list means a new file is in scope the moment it appears and
+  // a removed one drops out on its own.
+  const [deselectedIds, setDeselectedIds]   = useState<Set<string>>(() => new Set());
+  const selectedIds = useMemo(
+    () => datasets.filter(d => !deselectedIds.has(d.id)).map(d => d.id),
+    [datasets, deselectedIds]
+  );
   const [showDatasetPicker, setShowDatasetPicker] = useState(false);
   const [showExamples, setShowExamples]     = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -44,7 +54,11 @@ export default function QueryInput({ datasets, isQuerying, onQuery }: QueryInput
   };
 
   const toggleDataset = (id: string) =>
-    setSelectedIds(prev => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]);
+    setDeselectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
 
   const canSubmit = question.trim().length > 0 && !isQuerying && selectedIds.length > 0;
 

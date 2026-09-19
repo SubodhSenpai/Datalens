@@ -38,6 +38,21 @@ export interface RelationshipRecord {
   basis: "name" | "value-overlap";
   /** 1.0 for name matches; for value-overlap, the fraction of the smaller column's distinct values found in the other. */
   confidence: number;
+
+  // ── Inferred key structure (optional: absent on sessions stored before
+  // this existed, so consumers must tolerate undefined) ────────────────────
+  /**
+   * Which side repeats. "1:N" means columnA holds each key once and columnB
+   * repeats it; "N:M" means neither does, so joining these two multiplies
+   * rows and inflates every sum taken across the result.
+   */
+  cardinality?: "1:1" | "1:N" | "N:1" | "N:M";
+  /** The dataset holding the unique (parent) side, when exactly one does. */
+  parentDatasetId?: string;
+  /** Fraction of columnA's distinct keys also present in columnB. */
+  overlapAtoB?: number;
+  /** Fraction of columnB's distinct keys also present in columnA. */
+  overlapBtoA?: number;
 }
 
 export interface SessionRecord {
@@ -83,7 +98,10 @@ interface CacheEntry {
   session: SessionRecord;
   etag: string;
 }
-const cache = new Map<string, CacheEntry>();
+// On globalThis for the same reason as the local blob store (see blob.ts):
+// a dev hot-reload must not drop sessions that are still in use.
+const g = globalThis as unknown as { __datalensSessionCache?: Map<string, CacheEntry> };
+const cache: Map<string, CacheEntry> = g.__datalensSessionCache ?? (g.__datalensSessionCache = new Map());
 
 function serialize(session: SessionRecord): SerializedSession {
   return {
@@ -237,8 +255,20 @@ export async function addDatasets(
     // data for every dataset in the session, not just the ones just
     // uploaded — pre-existing datasets hydrated from Blob metadata may not
     // have rows loaded into this instance yet.
-    for (const d of allDatasets) await ensureDatasetRows(d);
-    session.relationships = await computeRelationships(allDatasets);
+    // A dataset whose bytes can no longer be loaded is left out of
+    // relationship detection rather than failing this upload — the file
+    // being uploaded NOW is fine, and the missing one will report itself
+    // the moment a query actually needs it.
+    const loadable: DatasetRecord[] = [];
+    for (const d of allDatasets) {
+      try {
+        await ensureDatasetRows(d);
+        loadable.push(d);
+      } catch (err) {
+        console.error(`addDatasets: skipping "${d.name}" for relationship detection — ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    session.relationships = await computeRelationships(loadable);
   });
 }
 

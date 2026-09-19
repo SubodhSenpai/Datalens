@@ -1,15 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
-import { QueryRequest, QueryResult, ChartDataPoint, PipelineStep } from "@/lib/types";
+import { QueryRequest, QueryResult, QueryPlan, ChartDataPoint, PipelineStep } from "@/lib/types";
 import { getSession, ensureDatasetRows } from "@/lib/session-store";
-import { planQuery, explainResults, LlmCallTrace } from "@/lib/llm";
+import { planQuery, explainResults, heuristicPlan, PlanParseError, LlmCallTrace } from "@/lib/llm";
 import { planToPandas } from "@/lib/pandas-codegen";
-import { executeQueryPlan, joinRows, JoinKeyMissingError } from "@/lib/query-engine";
+import { executeQueryPlan, joinRows, JoinKeyMissingError, JoinStats } from "@/lib/query-engine";
 import { evaluateChartChoice } from "@/lib/chart-eval";
-import { validateAndRepairPlan, injectMissingValueFilters, correctHallucinatedDateFilterYear, resolveTimeFilters, dropUnsatisfiableRangeFilters, PlanRepair } from "@/lib/plan-validator";
-import { detectUnsupportedConcepts, stripMisleadingAliases, detectPlannerHedging } from "@/lib/concept-guard";
+import { validateAndRepairPlan, injectMissingValueFilters, correctHallucinatedDateFilterYear, resolveTimeFilters, dropUnsatisfiableRangeFilters, referencedColumns, PlanRepair } from "@/lib/plan-validator";
+import { detectUnsupportedConcepts, stripMisleadingAliases, detectPlannerHedging, plannerSaysUnanswerable } from "@/lib/concept-guard";
 import { detectColumnAmbiguity } from "@/lib/data-dictionary";
+import { findUnselectedMentioned } from "@/lib/scope";
+import { assessPlan, retryFeedback, PlanAssessment } from "@/lib/answer-check";
 
 export const runtime = "nodejs";
+
+// Planner calls per question, including the first. Each retry is a real
+// LLM call, so this is a hard ceiling rather than a target.
+const MAX_PLAN_ATTEMPTS = 3;
 
 // Repairs that changed WHICH data the user is looking at deserve a line in
 // the explanation; purely cosmetic ones (a corrected column spelling) don't.
@@ -54,7 +60,13 @@ export async function POST(req: NextRequest) {
   const trace: PipelineStep[] = [];
 
   try {
-    const preAmbiguity = detectColumnAmbiguity(question, selected);
+    const preAmbiguity = detectColumnAmbiguity(question, selected, session.relationships);
+
+    // A question that names a file the user left unticked (see scope.ts).
+    const unselectedMentioned = findUnselectedMentioned(question, Array.from(session.datasets.values()), selected.map((d) => d.id));
+    const scopeWarnings = unselectedMentioned.length > 0
+      ? [`The question mentions ${unselectedMentioned.map((n) => `"${n}"`).join(" and ")}, which is uploaded but not selected for this query — the answer below was produced without it. Tick it in the file picker and ask again.`]
+      : [];
 
     trace.push({
       id: "input",
@@ -69,71 +81,203 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    const planTrace: LlmCallTrace = {};
-    const rawPlan = await planQuery(
-      question,
-      selected.map((d) => ({ id: d.id, name: d.name, rowCount: d.rowCount, columns: d.columns })),
-      session.relationships,
-      preAmbiguity,
-      apiKey,
-      planTrace
-    );
+    // ── Plan → validate → check it can answer the question, up to 3 times ──
+    // A small model sometimes returns a plan that is valid but answers the
+    // wrong SHAPE of question — rows where a total was asked for, or a
+    // formula the question spelled out left uncomputed. Those mismatches are
+    // detectable without a model (answer-check.ts), so the planner is called
+    // again with exactly what was wrong and how to fix it, and the corrected
+    // plan is used. Hard cap of MAX_PLAN_ATTEMPTS calls.
+    //
+    // If no attempt passes, the FIRST plan is kept, not the last: a retry
+    // was steered by our feedback, and if the check was mistaken the
+    // model's own uninfluenced reasoning is the safer thing to trust.
+    const schemaDatasets = selected.map((d) => ({ id: d.id, name: d.name, columns: d.columns }));
+    const availableColumnNames = Array.from(new Set(selected.flatMap((d) => d.columns.map((c) => c.name))));
 
-    trace.push({
-      id: "prompt",
-      label: "Prompt built and sent to the LLM",
-      status: planTrace.systemPrompt ? "ok" : "skipped",
-      summary: planTrace.systemPrompt
-        ? `Schema + relationships + question sent to ${planTrace.model ?? "the model"}`
-        : "No LLM call — no API key available",
-      detail: planTrace.systemPrompt
-        ? `SYSTEM PROMPT\n${planTrace.systemPrompt}\n\n─────────────\n\nUSER MESSAGE\n${planTrace.userPrompt ?? ""}`
-        : undefined,
-    });
+    let plan!: QueryPlan;
+    let repairs: PlanRepair[] = [];
+    let rawPlan!: QueryPlan;
+    let planTrace: LlmCallTrace = {};
+    let assessment: PlanAssessment = { ok: true, problems: [], hints: [] };
+    let firstAttempt: { plan: QueryPlan; repairs: PlanRepair[]; assessment: PlanAssessment } | undefined;
+    let feedback: string | undefined;
+    let attempts = 0;
 
-    trace.push({
-      id: "llm",
-      label: "LLM returned a query plan",
-      status: planTrace.usedHeuristicFallback ? "warn" : "ok",
-      summary: planTrace.usedHeuristicFallback
-        ? "Fell back to the deterministic keyword planner"
-        : `${planTrace.model ?? "model"} returned a structured plan`,
-      detail: planTrace.usedHeuristicFallback ? planTrace.fallbackReason : planTrace.rawResponse,
-      payload: rawPlan,
-      payloadLabel: "Parsed plan (before any corrections)",
-      ms: planTrace.ms,
-    });
+    const plannerDatasets = selected.map((d) => ({ id: d.id, name: d.name, rowCount: d.rowCount, columns: d.columns }));
 
-    // A small open-weight planner slips in predictable ways (join key that
-    // only exists on one side, dropped groupBy, chart pointed at a column
-    // the plan won't produce). Repair those deterministically from the
-    // schema before executing, so the answer doesn't depend on how the
-    // model happened to sample this time.
-    const { plan, repairs } = validateAndRepairPlan(
-      rawPlan,
-      question,
-      selected.map((d) => ({ id: d.id, name: d.name, columns: d.columns })),
-      session.relationships
-    );
+    for (attempts = 1; attempts <= MAX_PLAN_ATTEMPTS; attempts++) {
+      planTrace = {};
+      const attemptTag = attempts === 1 ? "" : ` (attempt ${attempts})`;
+      try {
+        rawPlan = await planQuery(question, plannerDatasets, session.relationships, preAmbiguity, apiKey, planTrace, feedback);
+      } catch (err) {
+        if (!(err instanceof PlanParseError)) throw err;
+        // The model replied with something that isn't a plan (prose, a
+        // question back, truncated JSON). That is exactly the kind of slip a
+        // second call fixes when the model is shown what it sent — so it is
+        // retried like any other failed attempt, and the keyword planner is
+        // the last resort, not the first reflex.
+        trace.push({
+          id: attempts === 1 ? "llm" : `llm-${attempts}`,
+          label: `LLM did not return a plan${attemptTag}`,
+          status: "warn",
+          summary: err.truncated
+            ? `${err.model} was cut off by the output limit before writing the plan${attempts < MAX_PLAN_ATTEMPTS ? " — asking it to continue" : ""}`
+            : `${err.model} replied, but the reply contained no JSON plan${attempts < MAX_PLAN_ATTEMPTS ? " — asking again" : ""}`,
+          detail: err.rawText || "(empty response)",
+          ms: planTrace.ms,
+        });
+        if (attempts < MAX_PLAN_ATTEMPTS) {
+          // A reply that is reasoning, not a plan, is worth keeping: a model
+          // that thought its way to the right formula and ran out of room
+          // should be asked to finish that thought, not told to stop thinking
+          // and answer in one line — that is how a good derivation turns into
+          // a shallow average of the wrong column.
+          const raw = err.rawText || "";
+          const looksLikeReasoning = raw.length > 200 && !/^\s*\{/.test(raw);
+          feedback = looksLikeReasoning
+            ? [
+                "",
+                "─────────────",
+                "Your previous reply was reasoning that stopped before the plan was written" + (err.truncated ? " (it ran out of room)" : "") + ". It was:",
+                raw.slice(-1500),
+                "",
+                "Continue from that reasoning and output the plan it leads to — as the JSON object described above, nothing else. It must start with { and include \"datasetId\". If your reasoning found that a quantity has to be computed from existing columns, express it with \"derive\".",
+              ].join("\n")
+            : [
+                "",
+                "─────────────",
+                "Your previous reply was not a plan. It began:",
+                (raw || "(empty)").slice(0, 400),
+                "",
+                "Reply with ONLY the JSON object described above — no prose, no markdown fences, no questions back. It must start with { and include \"datasetId\".",
+              ].join("\n");
+          continue;
+        }
+        rawPlan = heuristicPlan(question, plannerDatasets, session.relationships);
+        planTrace.usedHeuristicFallback = true;
+        planTrace.fallbackKind = "unparseable";
+        planTrace.fallbackReason = `The model never returned a parseable plan in ${MAX_PLAN_ATTEMPTS} attempts, so the deterministic keyword planner ran instead.`;
+      }
 
+      trace.push({
+        id: attempts === 1 ? "prompt" : `prompt-${attempts}`,
+        label: `Prompt built and sent to the LLM${attemptTag}`,
+        status: planTrace.systemPrompt ? "ok" : "skipped",
+        summary: planTrace.systemPrompt
+          ? `Schema + relationships + question${feedback ? " + feedback on the previous plan" : ""} sent to ${planTrace.model ?? "the model"}`
+          : "No LLM call — no API key available",
+        detail: planTrace.systemPrompt
+          ? `SYSTEM PROMPT\n${planTrace.systemPrompt}\n\n─────────────\n\nUSER MESSAGE\n${planTrace.userPrompt ?? ""}`
+          : undefined,
+      });
+
+      trace.push({
+        id: attempts === 1 ? "llm" : `llm-${attempts}`,
+        label: `LLM returned a query plan${attemptTag}`,
+        status: planTrace.usedHeuristicFallback ? "warn" : "ok",
+        summary: planTrace.usedHeuristicFallback
+          ? "Fell back to the deterministic keyword planner"
+          : `${planTrace.model ?? "model"} returned a structured plan`,
+        detail: planTrace.usedHeuristicFallback ? planTrace.fallbackReason : planTrace.rawResponse,
+        payload: rawPlan,
+        payloadLabel: "Parsed plan (before any corrections)",
+        ms: planTrace.ms,
+      });
+
+      // A small open-weight planner slips in predictable ways (join key that
+      // only exists on one side, dropped groupBy, chart pointed at a column
+      // the plan won't produce). Repair those deterministically from the
+      // schema before executing, so the answer doesn't depend on how the
+      // model happened to sample this time.
+      const validated = validateAndRepairPlan(rawPlan, question, schemaDatasets, session.relationships);
+      plan = validated.plan;
+      repairs = validated.repairs;
+
+      trace.push({
+        id: attempts === 1 ? "validate" : `validate-${attempts}`,
+        label: `Deterministic plan validation${attemptTag}`,
+        status: repairs.length > 0 ? "warn" : "ok",
+        summary: repairs.length > 0
+          ? `${repairs.length} correction${repairs.length === 1 ? "" : "s"} applied to the model's plan`
+          : "Plan passed every schema check unchanged",
+        detail: repairs.length > 0
+          ? repairs.map((r) => `• [${r.field}] ${r.detail}`).join("\n")
+          : "Checked against the schema: base dataset exists, join keys exist on both sides (following multi-hop chains), every filter/groupBy/aggregation column resolves, aggregates only run on numeric columns, derived expressions reference real columns, unused joins pruned, and the chart points at columns the plan will actually produce.",
+      });
+
+      assessment = assessPlan(question, plan, repairs, availableColumnNames);
+      if (!firstAttempt) firstAttempt = { plan, repairs, assessment };
+
+      trace.push({
+        id: attempts === 1 ? "answer-check" : `answer-check-${attempts}`,
+        label: `Can this plan answer the question?${attemptTag}`,
+        status: assessment.ok ? "ok" : "warn",
+        summary: assessment.ok
+          ? "Yes — its shape matches what was asked"
+          : attempts < MAX_PLAN_ATTEMPTS && !planTrace.usedHeuristicFallback
+            ? `No — ${assessment.problems.length} problem${assessment.problems.length === 1 ? "" : "s"}; asking the planner again with this feedback`
+            : `No — ${assessment.problems.length} problem${assessment.problems.length === 1 ? "" : "s"}, and no attempts left`,
+        detail: assessment.ok
+          ? "Checked: a question for a total/count/average has an aggregation; a formula spelled out in the question is computed; nothing the plan depended on had to be dropped."
+          : [...assessment.problems.map((p) => `• ${p}`), "", "Feedback for the retry:", ...assessment.hints.map((h) => `→ ${h}`)].join("\n"),
+      });
+
+      if (assessment.ok || planTrace.usedHeuristicFallback) break;
+      // The model has said the data it was shown can't answer this. More
+      // attempts with the same data cost calls and change nothing; its own
+      // explanation is the right thing to show.
+      if (plannerSaysUnanswerable(rawPlan.reasoning)) {
+        trace.push({
+          id: `answer-check-stop-${attempts}`,
+          label: "Retry skipped",
+          status: "warn",
+          summary: "The planner said the selected data cannot answer this question, so no further attempts were made",
+          detail: rawPlan.reasoning,
+        });
+        break;
+      }
+      feedback = retryFeedback(rawPlan, assessment);
+    }
+
+    const planningWarnings: string[] = [];
     const schemaRepairCount = repairs.length;
-    trace.push({
-      id: "validate",
-      label: "Deterministic plan validation",
-      status: schemaRepairCount > 0 ? "warn" : "ok",
-      summary: schemaRepairCount > 0
-        ? `${schemaRepairCount} correction${schemaRepairCount === 1 ? "" : "s"} applied to the model's plan`
-        : "Plan passed every schema check unchanged",
-      detail: schemaRepairCount > 0
-        ? repairs.map((r) => `• [${r.field}] ${r.detail}`).join("\n")
-        : "Checked against the schema: base dataset exists, join keys exist on both sides (following multi-hop chains), every filter/groupBy/aggregation column resolves, aggregates only run on numeric columns, derived expressions reference real columns, unused joins pruned, and the chart points at columns the plan will actually produce.",
-    });
+
+    // A keyword-planned answer is a guess at what the question meant. It
+    // has to be labelled as one everywhere the number appears — including
+    // in what the explainer is told, or it will narrate the guess as if it
+    // were the answer ("order value, as represented by resolution time").
+    if (planTrace.usedHeuristicFallback) {
+      const what = [
+        ...(plan.aggregations ?? []).map((a) => `${a.fn} of "${a.column}"`),
+        ...(plan.groupBy?.length ? [`grouped by ${plan.groupBy.join(", ")}`] : []),
+      ].join(", ");
+      const base = selected.find((d) => d.id === plan.datasetId)?.name ?? plan.datasetId;
+      planningWarnings.push(
+        `The AI planner did not produce a usable plan (${planTrace.fallbackReason ?? "unknown reason"}). A keyword-based fallback answered from "${base}"${what ? ` with ${what}` : ""} — this was chosen by matching words, not by understanding the question, and may not be what you asked. Try rephrasing, or name the file and column you mean.`
+      );
+    } else if (!assessment.ok && firstAttempt) {
+      // Every attempt failed the check: fall back to the model's first,
+      // unsteered plan and say so.
+      plan = firstAttempt.plan;
+      repairs = firstAttempt.repairs;
+      planningWarnings.push(
+        `After ${Math.min(attempts, MAX_PLAN_ATTEMPTS)} planning attempts the plan may still not match what was asked (${firstAttempt.assessment.problems[0]}). The first plan is shown; check the Steps tab.`
+      );
+    }
 
     const target = selected.find((d) => d.id === plan.datasetId) ?? selected[0];
     const byId = new Map(selected.map((d) => [d.id, d]));
 
     const joinWarnings: string[] = [];
     const joinSteps: string[] = [];
+    const planColumnRefs = new Set(referencedColumns(plan));
+    // Which joins genuinely did not run. Tracked explicitly because the
+    // "Source" panel used to infer this by checking whether any warning
+    // mentioned the dataset's name — which silently mislabelled a successful
+    // join as failed as soon as a warning merely referred to that file.
+    const failedJoinIds = new Set<string>();
     let workingRows = await ensureDatasetRows(target);
     const baseRowCount = workingRows.length;
     for (const join of plan.joins ?? []) {
@@ -144,25 +288,73 @@ export async function POST(req: NextRequest) {
       const rightKey = join.rightOn ?? join.on;
       if (!leftKey || !rightKey) {
         joinWarnings.push(`Skipped joining "${joinDataset.name}" — no join column was specified.`);
+        failedJoinIds.add(joinDataset.id);
         continue;
       }
 
       const joinRowsData = await ensureDatasetRows(joinDataset);
       const before = workingRows.length;
+      const stats: JoinStats = {
+        baseRows: 0, outputRows: 0, unmatchedBaseRows: 0,
+        maxMatchesPerBaseRow: 0, collidedColumns: [],
+      };
       try {
-        workingRows = joinRows(workingRows, joinRowsData, joinDataset.name, leftKey, rightKey, join.type ?? "inner");
+        workingRows = joinRows(workingRows, joinRowsData, joinDataset.name, leftKey, rightKey, join.type ?? "inner", stats);
         joinSteps.push(
           `${join.type ?? "inner"} join "${joinDataset.name}" on ${leftKey} = ${rightKey} → ${before.toLocaleString()} rows became ${workingRows.length.toLocaleString()}`
         );
+        if (stats.maxMatchesPerBaseRow > 1) {
+          joinSteps.push(
+            `  ↳ one-to-many: a single row matched up to ${stats.maxMatchesPerBaseRow} rows in "${joinDataset.name}"`
+          );
+        }
+        if (stats.unmatchedBaseRows > 0) {
+          joinSteps.push(
+            `  ↳ ${stats.unmatchedBaseRows.toLocaleString()} row${stats.unmatchedBaseRows === 1 ? "" : "s"} found no match` +
+              (join.type === "left" ? " (kept, joined columns blank)" : " and were dropped by the inner join")
+          );
+        }
+        // A column name present on both sides is a real trap: the base keeps
+        // the bare name, so a plan that says "amount" gets the base's amount
+        // no matter which one the question meant.
+        for (const c of stats.collidedColumns) {
+          joinSteps.push(
+            `  ↳ both sides have "${c.column}" — "${target.name}"'s kept that name, "${joinDataset.name}"'s became "${c.renamedTo}"`
+          );
+          if (planColumnRefs.has(c.column)) {
+            joinWarnings.push(
+              `Both "${target.name}" and "${joinDataset.name}" have a column called "${c.column}", and this query uses it — it resolved to "${target.name}"'s. If you meant the other one, ask for "${c.renamedTo}".`
+            );
+          }
+        }
       } catch (err) {
         if (err instanceof JoinKeyMissingError) {
           joinWarnings.push(
             `Could not join "${joinDataset.name}" (${err.message}) — results below only reflect "${target.name}".`
           );
           joinSteps.push(`SKIPPED join to "${joinDataset.name}" — ${err.message}`);
+          failedJoinIds.add(joinDataset.id);
           continue;
         }
         throw err;
+      }
+    }
+
+    // A join that multiplies rows also duplicates every base-side value it
+    // carries along. Summing one of the base's own columns afterwards reports
+    // a figure several times too large, and the number itself looks entirely
+    // plausible — this is the quiet way a multi-file answer goes wrong.
+    // countDistinct/min/max are unaffected by duplication, so they aren't flagged.
+    if (workingRows.length > baseRowCount) {
+      const baseColumns = new Set(target.columns.map((c) => c.name));
+      const distorted = (plan.aggregations ?? []).filter(
+        (a) => (a.fn === "sum" || a.fn === "avg" || a.fn === "count") && baseColumns.has(a.column)
+      );
+      if (distorted.length > 0) {
+        const list = distorted.map((a) => `${a.fn}(${a.column})`).join(", ");
+        joinWarnings.push(
+          `The join expanded "${target.name}" from ${baseRowCount.toLocaleString()} to ${workingRows.length.toLocaleString()} rows, so each of its rows now appears more than once. ${list} ${distorted.length === 1 ? "is" : "are"} taken over "${target.name}"'s own column${distorted.length === 1 ? "" : "s"}, so ${distorted.length === 1 ? "that figure counts" : "those figures count"} the same underlying value repeatedly.`
+        );
       }
     }
 
@@ -254,12 +446,32 @@ export async function POST(req: NextRequest) {
       ...(plan.select ?? []),
       ...(plan.derive ?? []).flatMap((d) => d.expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []),
     ]);
+    // Which files this answer actually drew on — needed because the same
+    // column name can exist in several of them.
+    const datasetsInPlay = new Set<string>([target.name]);
+    for (const join of plan.joins ?? []) {
+      const jd = byId.get(join.datasetId);
+      if (jd && !failedJoinIds.has(jd.id)) datasetsInPlay.add(jd.name);
+    }
+
+    const describeCandidate = (c: { column: string; datasetName: string }) =>
+      `"${c.column}" (${c.datasetName})`;
+
     const ambiguityNotes = preAmbiguity.flatMap((w) => {
-      const used = w.candidates.find((c) => usedColumnNames.has(c.column));
+      // Candidates are identified by column AND file: two files can each have
+      // an "amount", and comparing on the name alone treated those as one
+      // candidate, which silently suppressed the very warning that case needs.
+      const used =
+        w.candidates.find((c) => usedColumnNames.has(c.column) && datasetsInPlay.has(c.datasetName)) ??
+        w.candidates.find((c) => usedColumnNames.has(c.column));
       if (!used) return [];
-      const others = w.candidates.filter((c) => c.column !== used.column);
+      const others = w.candidates.filter(
+        (c) => c.column !== used.column || c.datasetName !== used.datasetName
+      );
       if (others.length === 0) return [];
-      return [`"${w.concept}" could mean ${w.candidates.map((c) => `"${c.column}" (${c.datasetName})`).join(" or ")} — this answer uses "${used.column}".`];
+      return [
+        `"${w.concept}" could mean ${w.candidates.map(describeCandidate).join(" or ")} — this answer uses ${describeCandidate(used)}.`,
+      ];
     });
 
     // The planner is instructed to pair chartType "scatter" with a
@@ -327,9 +539,8 @@ export async function POST(req: NextRequest) {
       const leftKey = join.leftOn ?? join.on;
       const rightKey = join.rightOn ?? join.on;
       if (!leftKey || !rightKey) continue;
-      // Only report joins that actually succeeded (didn't hit a warning above).
-      const failed = joinWarnings.some((w) => w.includes(`"${joinDataset.name}"`));
-      if (failed) continue;
+      // Only report joins that actually ran.
+      if (failedJoinIds.has(joinDataset.id)) continue;
       filesUsed.push(joinDataset.name);
       joinsUsed.push(`${target.name}.${leftKey} ⋈ ${joinDataset.name}.${rightKey}`);
     }
@@ -356,7 +567,15 @@ export async function POST(req: NextRequest) {
       execution.rows,
       execution.columns,
       execution.correlation,
-      [...conceptWarnings.map((w) => w.message), ...(hedgeWarning ? [hedgeWarning] : [])],
+      [
+        ...conceptWarnings.map((w) => w.message),
+        ...(hedgeWarning ? [hedgeWarning] : []),
+        // Only present when the keyword fallback ran — on a normal run the
+        // explainer's prompt is exactly what it was before.
+        ...(planTrace.usedHeuristicFallback
+          ? ["this result came from a keyword-based fallback, not from understanding the question — say plainly that it may not answer what was asked, and do not describe the computed column as if it were the quantity the question named"]
+          : []),
+      ],
       apiKey,
       explainTrace
     );
@@ -410,6 +629,8 @@ export async function POST(req: NextRequest) {
       explanation: [
         // Stated by us, not left to the model: if the data can't answer the
         // question, that must appear even if the model ignores the prompt.
+        ...scopeWarnings.map((w) => `Important: ${w}`),
+        ...planningWarnings.map((w) => `Important: ${w}`),
         ...conceptWarnings.map((w) => `Important: ${w.message}.`),
         ...(hedgeWarning ? [`Important: ${hedgeWarning}`] : []),
         ...ambiguityNotes.map((n) => `Note: ${n}`),

@@ -154,3 +154,24 @@ export function stripMisleadingAliases(
 
   return { aggregations: next, renames };
 }
+
+// The subset of hedging that says the question is UNANSWERABLE from what the
+// planner was shown — a missing dataset or column, not a mere assumption.
+// Word stems only, so it isn't tied to any one model's phrasing.
+const PLANNER_INABILITY = new RegExp(
+  [
+    String.raw`\b(?:no such|does not exist|doesn'?t exist|not (?:present|available|provided|included) in)\b`,
+    String.raw`\b(?:can'?t|cannot|can not|unable to|not possible to|no way to)\b[^.]{0,40}\b(?:comput|calculat|determin|answer|deriv)\w*`,
+    String.raw`\b(?:lacks?|missing|without)\b[^.]{0,30}\b(?:column|field|dataset|table|data)\b`,
+  ].join("|"),
+  "i"
+);
+
+/**
+ * True when the planner's reasoning says the data it was shown cannot answer
+ * the question. A retry with feedback cannot conjure a missing file, so the
+ * caller should stop here and pass the model's own explanation through.
+ */
+export function plannerSaysUnanswerable(reasoning: string | undefined): boolean {
+  return Boolean(reasoning && PLANNER_INABILITY.test(reasoning));
+}

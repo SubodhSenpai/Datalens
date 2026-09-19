@@ -7,7 +7,13 @@ import { put, del, get, BlobPreconditionFailedError } from "@vercel/blob";
 
 const hasBlobToken = !!process.env.BLOB_READ_WRITE_TOKEN;
 
-const localBlobs = new Map<string, Buffer>();
+// Kept on globalThis so it survives Next.js dev hot-reloads. A plain module
+// constant is recreated empty every time this file (or an import of it) is
+// edited while the dev server runs — the session then still lists a file
+// whose bytes have vanished, and the next upload fails with "Could not load
+// dataset from storage". Production with a real Blob token never hits this.
+const g = globalThis as unknown as { __datalensLocalBlobs?: Map<string, Buffer> };
+const localBlobs: Map<string, Buffer> = g.__datalensLocalBlobs ?? (g.__datalensLocalBlobs = new Map());
 
 // Cheap content-hash etag for the local fallback, so callers doing
 // conditional reads/writes (ifNoneMatch / ifMatch) see the same semantics

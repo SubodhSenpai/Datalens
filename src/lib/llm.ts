@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { AggregateFn, ColumnSchema, FilterOp, QueryPlan } from "./types";
 import { RelationshipRecord } from "./session-store";
+import { joinPrefix } from "./query-engine";
 import { AmbiguityWarning } from "./data-dictionary";
 
 export interface DatasetSchemaContext {
@@ -25,6 +26,28 @@ export interface LlmCallTrace {
   ms?: number;
   usedHeuristicFallback?: boolean;
   fallbackReason?: string;
+  /** Why the keyword planner ran, when it did. */
+  fallbackKind?: "no-key" | "unparseable" | "provider-error";
+  /** The provider's finish_reason — "length" means the reply was cut off. */
+  finishReason?: string;
+}
+
+/**
+ * The model answered, but not with a plan. Thrown instead of silently
+ * substituting the keyword planner, so the caller can ask the model again
+ * with the unparseable text in hand — a model that wrote prose or truncated
+ * its JSON usually gets it right when told exactly that.
+ */
+export class PlanParseError extends Error {
+  constructor(
+    public readonly rawText: string,
+    public readonly model: string,
+    /** The reply was cut off by the output token limit before it finished. */
+    public readonly truncated: boolean
+  ) {
+    super("The model's response contained no JSON plan with a datasetId.");
+    this.name = "PlanParseError";
+  }
 }
 
 // Open-source models served via OpenRouter (OpenAI-compatible API), per the
@@ -70,6 +93,7 @@ function getClients(userApiKey?: string): OpenAI[] {
 // json_object`, so this relies on the prompt instructing JSON-only output
 // plus extractJson()'s regex fallback below, rather than a mode that could
 // be silently unsupported per model/provider.
+const PLANNER_MAX_TOKENS = 2000;
 const RATE_LIMIT_RETRIES = 2;
 const RATE_LIMIT_BACKOFF_MS = 1500;
 
@@ -87,13 +111,13 @@ async function completeJson(
   system: string,
   userMessage: string,
   maxTokens: number
-): Promise<{ text: string; model: string }> {
+): Promise<{ text: string; model: string; finishReason?: string }> {
   let lastErr: unknown;
   for (const model of MODEL_CHAIN) {
     for (const client of clients) {
       try {
-        const text = await completeJsonWithModel(client, model, system, userMessage, maxTokens);
-        return { text, model };
+        const { text, finishReason } = await completeJsonWithModel(client, model, system, userMessage, maxTokens);
+        return { text, model, finishReason };
       } catch (err) {
         lastErr = err;
         // Only move on to the next key/model for capacity-related failures
@@ -113,7 +137,13 @@ function isCapacityError(err: unknown): boolean {
   return /402|insufficient credits|no.*instances|not available/i.test(msg);
 }
 
-async function completeJsonWithModel(client: OpenAI, model: string, system: string, userMessage: string, maxTokens: number): Promise<string> {
+interface Completion {
+  text: string;
+  /** "length" means the model was cut off by max_tokens — its JSON may simply never have been reached. */
+  finishReason?: string;
+}
+
+async function completeJsonWithModel(client: OpenAI, model: string, system: string, userMessage: string, maxTokens: number): Promise<Completion> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= RATE_LIMIT_RETRIES; attempt++) {
     if (attempt > 0) await new Promise((r) => setTimeout(r, RATE_LIMIT_BACKOFF_MS * attempt));
@@ -141,14 +171,15 @@ async function completeJsonWithModel(client: OpenAI, model: string, system: stri
           { role: "user", content: userMessage },
         ],
       });
+      const finishReason = response.choices[0]?.finish_reason ?? undefined;
       const content = response.choices[0]?.message?.content;
-      if (content) return content;
+      if (content) return { text: content, finishReason };
       // Some reasoning models put the answer in a non-standard "reasoning"
       // field instead of "content" when they run out of budget mid-thought —
       // salvage a trailing JSON object from it rather than treating this as
       // a total failure straight to the heuristic fallback.
       const reasoning = (response.choices[0]?.message as { reasoning?: string } | undefined)?.reasoning;
-      return reasoning ?? "";
+      return { text: reasoning ?? "", finishReason };
     } catch (err) {
       lastErr = err;
       // A free-tier shared pool returning 429 is transient congestion, not
@@ -168,12 +199,15 @@ export async function planQuery(
   relationships: RelationshipRecord[],
   ambiguities: AmbiguityWarning[] = [],
   userApiKey?: string,
-  trace?: LlmCallTrace
+  trace?: LlmCallTrace,
+  /** On a retry: what the last plan got wrong and how to fix it (see answer-check.ts). */
+  feedback?: string
 ): Promise<QueryPlan> {
   const clients = getClients(userApiKey);
   if (clients.length === 0) {
     if (trace) {
       trace.usedHeuristicFallback = true;
+      trace.fallbackKind = "no-key";
       trace.fallbackReason = "No API key configured (neither a server key nor one set in the browser), so the deterministic keyword planner ran instead of an LLM.";
     }
     return heuristicPlan(question, datasets, relationships);
@@ -185,10 +219,19 @@ export async function planQuery(
   // right table in its own "reasoning" while pointing datasetId at a
   // different one. A filename is meaningful, so a slip is both less likely
   // and recoverable by fuzzy-matching downstream.
+  // Names and types alone cannot separate an "amount" in one file from an
+  // "amount" in another. A couple of real values and a key marker usually
+  // can, and they are the cheapest disambiguating evidence available.
   const schemaContext = datasets.map((d) => ({
     dataset: d.name,
     rowCount: d.rowCount,
-    columns: d.columns.map((c) => ({ name: c.name, type: c.type })),
+    prefixWhenJoined: joinPrefix(d.name),
+    columns: d.columns.map((c) => ({
+      name: c.name,
+      type: c.type,
+      ...(c.isUnique ? { uniquePerRow: true } : {}),
+      ...(c.sample?.length ? { examples: c.sample.slice(0, 3) } : {}),
+    })),
   }));
   const relationshipContext = relationships.map((r) => ({
     datasetA: datasets.find((d) => d.id === r.datasetIdA)?.name ?? r.datasetIdA,
@@ -197,6 +240,7 @@ export async function planQuery(
     columnB: r.columnB,
     basis: r.basis,
     confidence: r.confidence,
+    ...(r.cardinality ? { cardinality: r.cardinality } : {}),
   }));
 
   const system = `You are a query planner for a tabular data analysis tool. Given a user's natural-language question and the schema of one or more datasets (plus detected column relationships between them), output ONLY a JSON object (no markdown, no prose) matching this TypeScript type:
@@ -222,7 +266,7 @@ type QueryPlan = {
 
 A question comparing multiple values of the SAME column ("active vs exited", "B2B vs B2C", "compare X and Y") wants a groupBy on that column, NOT a filter — a plan can only have one value per "eq" filter on a column, so filtering "status = active" AND "status = exited" at once matches zero rows. GroupBy shows every value (including ones not named) in one result; only add a filter when the question wants to see ONE value/subset, not when it's comparing several.
 
-Only reference columns that exist in the given schema (post-join, joined-in columns keep their original name unless it collides with a base column, in which case it's prefixed with "<joinedDatasetName>_"). Pick sensible defaults: totals/averages/counts always need an "aggregations" entry (never leave a "total"/"average" question as an unaggregated row dump); "by <dimension>" or "each <dimension>" implies groupBy; "top/bottom N" implies sort+limit; chartType "none" only for a single scalar answer. Chart choice: bar for comparing a handful of categories, dot instead of bar when there are more than ~12 categories, line for trends over time, area for cumulative/running totals over time, pie for a proportion breakdown of 5 or fewer categories, treemap for a proportion breakdown of 6+ categories, histogram for the distribution of one numeric column, scatter for the relationship between two numeric columns (pair with "correlate"), radar for comparing several metrics across a few entities, heatmap for a value across two categorical dimensions at once.
+Only reference columns that exist in the given schema. After a join, a joined-in column keeps its original name unless a column of that name already exists, in which case it is renamed to that dataset's "prefixWhenJoined" value + "_" + the column name (the prefix is given per dataset above — use it exactly; it is NOT the file name). So if two files each have "amount" and the second is joined in, the base's stays "amount" and the joined one becomes e.g. "refunds_amount". Pick sensible defaults: totals/averages/counts always need an "aggregations" entry (never leave a "total"/"average" question as an unaggregated row dump); "by <dimension>" or "each <dimension>" implies groupBy; "top/bottom N" implies sort+limit; chartType "none" only for a single scalar answer. Chart choice: bar for comparing a handful of categories, dot instead of bar when there are more than ~12 categories, line for trends over time, area for cumulative/running totals over time, pie for a proportion breakdown of 5 or fewer categories, treemap for a proportion breakdown of 6+ categories, histogram for the distribution of one numeric column, scatter for the relationship between two numeric columns (pair with "correlate"), radar for comparing several metrics across a few entities, heatmap for a value across two categorical dimensions at once.
 
 For a trend/time-series question, you MUST bucket the date column with dateBucket before grouping by it — never groupBy a raw date column directly, since every row has a distinct timestamp and that produces one group per row instead of a real trend. Example: question "show the monthly usage trend", dataset has date column "reading_taken_at" and numeric column "kwh":
 {"datasetId":"meter_readings.csv","dateBucket":{"column":"reading_taken_at","granularity":"month","as":"reading_month"},"groupBy":["reading_month"],"aggregations":[{"column":"kwh","fn":"sum","as":"total_kwh"}],"sort":[{"column":"reading_month","direction":"asc"}],"chartType":"line","chartX":"reading_month","chartY":["total_kwh"]}
@@ -245,6 +289,10 @@ Three-dataset example — this pattern applies whenever the value you need to gr
 {"datasetId":"shipments.csv","joins":[{"datasetId":"warehouses.csv","on":"warehouse_id"},{"datasetId":"zones.csv","on":"zone_id"}],"groupBy":["zone_name"],"aggregations":[{"column":"weight_kg","fn":"sum","as":"total_weight"}],"chartType":"bar","chartX":"zone_name","chartY":["total_weight"]}
 Do NOT join a dataset that the question doesn't actually need data from, even if a relationship to it exists — an extra join multiplies every row (and every sum) by however many matching rows it adds. Only include a join whose columns you will actually filter/groupBy/aggregate/select/chart by.
 
+Each relationship also carries a "cardinality". "1:N" means datasetA holds each key value once while datasetB repeats it; "N:1" is the reverse; "1:1" means both sides hold it once; "N:M" means neither does. Joining an N:M pair produces every combination of matching rows, which multiplies the data and inflates any total taken over it — only do that if the question genuinely asks about the combinations. When a one-side is joined to a many-side, each of the one-side's rows is duplicated, so a sum/average/count over one of ITS OWN columns afterwards counts the same value repeatedly: pick as "datasetId" the dataset that actually holds the number being aggregated, and join outwards from it.
+
+The same column name can appear in several datasets and mean completely different things — each file may have its own "amount", "date", "name" or "id". A column marked "uniquePerRow" holds each value once, which is what an identifier looks like; one that repeats is usually a measure or a category. Use that, plus the "examples" values and the file's other columns, to decide which dataset a question's wording actually refers to, and name that dataset in "reasoning" when more than one could have been meant.
+
 This system only aggregates and summarizes data that already exists — it has no forecasting, prediction, or trend-extrapolation capability. If asked to predict, forecast, or project a future value, do NOT invent one: plan the closest honest historical answer instead (e.g. the actual past trend), never name an aggregation "predicted_x"/"forecast_x", and use "reasoning" to note that forecasting isn't supported so the explanation reflects that limitation rather than presenting a fabricated number as a real prediction.`;
 
   const ambiguityLine = ambiguities.length
@@ -252,7 +300,7 @@ This system only aggregates and summarizes data that already exists — it has n
         .map((a) => `- "${a.concept}": ${a.candidates.map((c) => `"${c.column}" (${c.datasetName})`).join(" or ")}`)
         .join("\n")}\nPick the one that most literally matches the question, and say which one you picked (and that alternatives exist) in "reasoning".`
     : "";
-  const userMessage = `Datasets:\n${JSON.stringify(schemaContext, null, 2)}\n\nRelationships:\n${JSON.stringify(relationshipContext, null, 2)}${ambiguityLine}\n\nQuestion: ${question}`;
+  const userMessage = `Datasets:\n${JSON.stringify(schemaContext, null, 2)}\n\nRelationships:\n${JSON.stringify(relationshipContext, null, 2)}${ambiguityLine}\n\nQuestion: ${question}${feedback ?? ""}`;
 
   if (trace) {
     trace.systemPrompt = system;
@@ -261,22 +309,23 @@ This system only aggregates and summarizes data that already exists — it has n
 
   const started = Date.now();
   try {
-    const { text, model } = await completeJson(clients, system, userMessage, 600);
+    // A plan is a few hundred tokens, but some models reason at length in
+    // their visible output before writing it — at a tight budget that
+    // reasoning gets cut off before the JSON ever appears, and the retry then
+    // has to work from nothing. The budget is sized for the reasoning, not
+    // the plan.
+    const { text, model, finishReason } = await completeJson(clients, system, userMessage, PLANNER_MAX_TOKENS);
     if (trace) {
       trace.model = model;
       trace.rawResponse = text;
       trace.ms = Date.now() - started;
+      trace.finishReason = finishReason;
     }
     const plan = extractJson<QueryPlan>(text);
-    if (!plan || !plan.datasetId) {
-      if (trace) {
-        trace.usedHeuristicFallback = true;
-        trace.fallbackReason = "The model's response could not be parsed as a valid plan (no JSON object with a datasetId), so the deterministic keyword planner ran instead.";
-      }
-      return heuristicPlan(question, datasets, relationships);
-    }
+    if (!plan || !plan.datasetId) throw new PlanParseError(text, model, finishReason === "length");
     return plan;
   } catch (err) {
+    if (err instanceof PlanParseError) throw err;
     // The provider (rate limit, out-of-credits, transient outage) failing
     // shouldn't take the whole app down — degrade to the deterministic
     // keyword planner rather than surfacing a raw API error to the user.
@@ -284,6 +333,7 @@ This system only aggregates and summarizes data that already exists — it has n
     if (trace) {
       trace.ms = Date.now() - started;
       trace.usedHeuristicFallback = true;
+      trace.fallbackKind = "provider-error";
       trace.fallbackReason = `Every model/key in the chain failed (${err instanceof Error ? err.message : String(err)}), so the deterministic keyword planner ran instead.`;
     }
     return heuristicPlan(question, datasets, relationships);
@@ -367,7 +417,7 @@ If the question asks for something this data cannot support — forecasting/pred
 // averages, filters, comparisons/groupBy, trends, cross-file joins) with
 // plain regex/keyword matching rather than delegating any of that judgment
 // to an LLM — real language understanding still requires the real planner.
-function heuristicPlan(question: string, datasets: DatasetSchemaContext[], relationships: RelationshipRecord[]): QueryPlan {
+export function heuristicPlan(question: string, datasets: DatasetSchemaContext[], relationships: RelationshipRecord[]): QueryPlan {
   const base = pickBestDataset(question, datasets);
   if (!base) return { datasetId: "", limit: 50, chartType: "none" };
 
@@ -394,7 +444,7 @@ function heuristicPlan(question: string, datasets: DatasetSchemaContext[], relat
         filters: filters.length ? filters : undefined,
         correlate: { columnX: colX.name, columnY: colY.name },
         chartType: "scatter", chartX: colX.name, chartY: [colY.name],
-        reasoning: `Heuristic fallback (no OPENROUTER_API_KEY) — computed correlation between ${colX.name} and ${colY.name}.`,
+        reasoning: `Keyword fallback (the AI planner produced no usable plan) — computed correlation between ${colX.name} and ${colY.name}.`,
       };
     }
   }
@@ -411,7 +461,7 @@ function heuristicPlan(question: string, datasets: DatasetSchemaContext[], relat
       aggregations: numericCol ? [{ column: numericCol, fn: agg?.fn ?? "sum", as: yCol }] : undefined,
       sort: [{ column: bucketCol, direction: "asc" }],
       chartType: "line", chartX: bucketCol, chartY: [yCol],
-      reasoning: "Heuristic fallback (no OPENROUTER_API_KEY) — grouped by month to show a trend.",
+      reasoning: "Keyword fallback (the AI planner produced no usable plan) — grouped by month to show a trend.",
     };
   }
 
@@ -424,7 +474,7 @@ function heuristicPlan(question: string, datasets: DatasetSchemaContext[], relat
       aggregations: [{ column: agg.column ?? "", fn: agg.fn, as: asName }],
       sort: [{ column: asName, direction: "desc" }],
       chartType: "bar", chartX: groupByCol, chartY: [asName],
-      reasoning: `Heuristic fallback (no OPENROUTER_API_KEY) — ${agg.fn} of ${agg.column ?? "rows"} grouped by ${groupByCol}.`,
+      reasoning: `Keyword fallback (the AI planner produced no usable plan) — ${agg.fn} of ${agg.column ?? "rows"} grouped by ${groupByCol}.`,
     };
   }
 
@@ -436,7 +486,7 @@ function heuristicPlan(question: string, datasets: DatasetSchemaContext[], relat
       groupBy: [],
       aggregations: [{ column: agg.column ?? "", fn: agg.fn, as: asName }],
       chartType: "none",
-      reasoning: `Heuristic fallback (no OPENROUTER_API_KEY) — computed ${agg.fn} of ${agg.column ?? "rows"}.`,
+      reasoning: `Keyword fallback (the AI planner produced no usable plan) — computed ${agg.fn} of ${agg.column ?? "rows"}.`,
     };
   }
 
@@ -454,7 +504,7 @@ function heuristicPlan(question: string, datasets: DatasetSchemaContext[], relat
       sort: [{ column: numericCol.name, direction: wantsBottom ? "asc" : "desc" }],
       limit,
       chartType: "bar", chartX: stringCol?.name ?? columns[0]?.name, chartY: [numericCol.name],
-      reasoning: "Heuristic fallback (no OPENROUTER_API_KEY) — top/bottom-N by the most relevant numeric column.",
+      reasoning: "Keyword fallback (the AI planner produced no usable plan) — top/bottom-N by the most relevant numeric column.",
     };
   }
 
@@ -463,7 +513,7 @@ function heuristicPlan(question: string, datasets: DatasetSchemaContext[], relat
     filters: filters.length ? filters : undefined,
     limit: 50,
     chartType: "none",
-    reasoning: "Heuristic fallback (no OPENROUTER_API_KEY) — filtered preview of the dataset.",
+    reasoning: "Keyword fallback (the AI planner produced no usable plan) — filtered preview of the dataset.",
   };
 }
 

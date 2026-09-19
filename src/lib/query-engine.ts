@@ -1,4 +1,5 @@
 import { QueryPlan, QueryFilter, QueryAggregation, QueryDateBucket, QueryDerivedColumn } from "./types";
+import { normalizeKey } from "./keys";
 
 export interface ExecutionResult {
   columns: string[];
@@ -20,6 +21,34 @@ export class JoinKeyMissingError extends Error {
   }
 }
 
+/**
+ * The prefix a joined dataset's columns receive when they collide with a
+ * column already present: file extension dropped, anything that isn't a
+ * letter or digit collapsed to "_". "c_refunds.csv" → "c_refunds", so its
+ * colliding "amount" becomes "c_refunds_amount". Exported because the
+ * validator and the planner prompt must produce exactly the same name, or a
+ * correctly written plan gets rejected as referencing an unknown column.
+ */
+export function joinPrefix(datasetName: string): string {
+  return datasetName.replace(/\.(csv|xlsx|xls)$/i, "").replace(/[^a-zA-Z0-9]+/g, "_");
+}
+
+/** What a join actually did, for the trace and for fan-out detection. */
+export interface JoinStats {
+  baseRows: number;
+  outputRows: number;
+  /** Base rows that found no match (dropped by an inner join). */
+  unmatchedBaseRows: number;
+  /** Most matches any single base row attracted — >1 means the join fanned out. */
+  maxMatchesPerBaseRow: number;
+  /**
+   * Column names that existed on BOTH sides and so were renamed on the
+   * joined side. The base keeps the bare name, which means a plan referring
+   * to it gets the base's column — worth saying out loud.
+   */
+  collidedColumns: { column: string; renamedTo: string }[];
+}
+
 // Inner/left join of two row sets on (possibly differently-named) key
 // columns, prefixing the joined dataset's non-key columns to avoid
 // clobbering same-named columns — the JS equivalent of the "Apply
@@ -37,35 +66,68 @@ export function joinRows(
   joinDatasetName: string,
   leftKey: string,
   rightKey: string,
-  type: "inner" | "left" = "inner"
+  type: "inner" | "left" = "inner",
+  stats?: JoinStats
 ): Record<string, unknown>[] {
   if (baseRows.length > 0 && !(leftKey in baseRows[0])) throw new JoinKeyMissingError(leftKey, "base");
   if (otherRows.length > 0 && !(rightKey in otherRows[0])) throw new JoinKeyMissingError(rightKey, "joined");
 
+  // Keys are compared through the shared normalizer, the same one
+  // relationship detection uses. Comparing them raw meant a pair of files
+  // whose ids differed only in case or padding was reported as joinable and
+  // then matched nothing. A key that normalizes to null (blank, "N/A") is
+  // not an identity and is excluded from the index entirely, so those rows
+  // cannot all collapse onto one another.
   const index = new Map<string, Record<string, unknown>[]>();
   for (const row of otherRows) {
-    const key = String(row[rightKey]);
+    const key = normalizeKey(row[rightKey]);
+    if (key === null) continue;
     const bucket = index.get(key);
     if (bucket) bucket.push(row); else index.set(key, [row]);
   }
 
-  const prefix = joinDatasetName.replace(/\.(csv|xlsx|xls)$/i, "").replace(/[^a-zA-Z0-9]+/g, "_");
+  const prefix = joinPrefix(joinDatasetName);
+
+  const baseColumns = new Set(baseRows.length > 0 ? Object.keys(baseRows[0]) : []);
+  const collided: { column: string; renamedTo: string }[] = [];
+  for (const key of otherRows.length > 0 ? Object.keys(otherRows[0]) : []) {
+    if (key !== rightKey && baseColumns.has(key)) {
+      collided.push({ column: key, renamedTo: `${prefix}_${key}` });
+    }
+  }
+
+  let unmatched = 0;
+  let maxMatches = 0;
 
   const out: Record<string, unknown>[] = [];
   for (const row of baseRows) {
-    const matches = index.get(String(row[leftKey])) ?? [];
+    const key = normalizeKey(row[leftKey]);
+    const matches = key === null ? [] : index.get(key) ?? [];
+    if (matches.length > maxMatches) maxMatches = matches.length;
     if (matches.length === 0) {
+      unmatched++;
       if (type === "left") out.push({ ...row });
       continue;
     }
     for (const match of matches) {
       const merged: Record<string, unknown> = { ...row };
-      for (const [key, value] of Object.entries(match)) {
-        if (key === rightKey) continue;
-        merged[key in merged ? `${prefix}_${key}` : key] = value;
+      for (const [k, value] of Object.entries(match)) {
+        if (k === rightKey) continue;
+        // Renaming is decided from the BASE's column set, not from whatever
+        // keys this particular merged row happens to carry, so a column
+        // lands under the same name on every row.
+        merged[baseColumns.has(k) ? `${prefix}_${k}` : k] = value;
       }
       out.push(merged);
     }
+  }
+
+  if (stats) {
+    stats.baseRows = baseRows.length;
+    stats.outputRows = out.length;
+    stats.unmatchedBaseRows = unmatched;
+    stats.maxMatchesPerBaseRow = maxMatches;
+    stats.collidedColumns = collided;
   }
   return out;
 }

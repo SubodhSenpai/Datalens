@@ -1,5 +1,6 @@
 import { ColumnSchema, FilterOp, QueryPlan } from "./types";
 import { RelationshipRecord } from "./session-store";
+import { joinPrefix } from "./query-engine";
 
 const VALID_FILTER_OPS: FilterOp[] = ["eq", "neq", "gt", "gte", "lt", "lte", "contains"];
 
@@ -131,9 +132,7 @@ export function validateAndRepairPlan(
       keptJoins.push({ datasetId: other.id, leftOn, rightOn, type: join.type ?? "inner" });
       joinedDatasets.push(other);
       includedIds.push(other.id);
-      for (const col of other.columns) {
-        if (!availableColumns.some((c) => c.name === col.name)) availableColumns.push(col);
-      }
+      addJoinedColumns(availableColumns, other, rightOn);
     }
     repaired.joins = keptJoins.length > 0 ? keptJoins : undefined;
   }
@@ -244,7 +243,22 @@ export function validateAndRepairPlan(
   if (repaired.aggregations?.length) {
     const kept = [];
     for (const a of repaired.aggregations) {
-      if (a.fn === "count") { kept.push(a); continue; }
+      // count tolerates any column type, but not any column NAME: counting a
+      // column that only exists in a file the plan never reached silently
+      // degrades into a row count of the wrong table. Resolve it like the
+      // others; a genuinely absent column becomes a row count, and that is
+      // said out loud rather than presented as a count of the thing asked for.
+      if (a.fn === "count") {
+        const col = resolveColumn(a.column, availableColumns)
+          ?? autoIncludeDatasetWithColumn(a.column, undefined, datasets, includedIds, relationships, availableColumns, joinedDatasets, repaired, repairs);
+        if (!col) {
+          repairs.push({ field: "aggregations", detail: `count on "${a.column}" — no such column exists in the data in play, so this counts rows instead.` });
+          kept.push(a);
+        } else {
+          kept.push({ ...a, column: col });
+        }
+        continue;
+      }
       let col = resolveColumn(a.column, availableColumns);
       // The aggregation target lives in a dataset the plan never joined — if
       // a relationship connects that dataset to something already in the
@@ -315,7 +329,10 @@ export function validateAndRepairPlan(
   // silently answers a 12-month question with one lifetime total.
   const granularity = impliedTimeGranularity(question);
   if (granularity && repaired.aggregations?.length && !repaired.groupBy?.length && !repaired.dateBucket) {
-    const dateCol = availableColumns.find((c) => c.type === "date");
+    // With several date columns (ordered vs shipped vs delivered) picking the
+    // first is a guess about which one the question means — leave it alone.
+    const dateCols = availableColumns.filter((c) => c.type === "date");
+    const dateCol = dateCols.length === 1 ? dateCols[0] : undefined;
     if (dateCol) {
       const alias = `${dateCol.name}_${granularity}`;
       repaired.dateBucket = { column: dateCol.name, granularity, as: alias };
@@ -354,7 +371,11 @@ export function validateAndRepairPlan(
     for (let i = keptJoins.length - 1; i >= 0; i--) {
       const ds = chain[i + 1];
       if (!ds) continue;
-      const providesUsedColumn = ds.columns.some((c) => usedColumns.has(c.name));
+      // The joined side's key is never carried into the result (the base's
+      // copy is what survives), so it doesn't count as something this join
+      // provides — otherwise every same-name join looked "used" by its key.
+      const joinedKey = keptJoins[i].rightOn ?? keptJoins[i].on;
+      const providesUsedColumn = ds.columns.some((c) => c.name !== joinedKey && usedColumns.has(c.name));
       // A later surviving join needs THIS dataset as a bridge if its leftOn
       // column belongs only to this dataset among everything before it.
       const isBridgeForLaterJoin = keptJoins.slice(i + 1).some((laterJoin) => {
@@ -362,8 +383,24 @@ export function validateAndRepairPlan(
         return !priorChain.some((d) => d.columns.some((c) => c.name === laterJoin.leftOn)) &&
           ds.columns.some((c) => c.name === laterJoin.leftOn);
       });
-      if (!providesUsedColumn && !isBridgeForLaterJoin) {
-        repairs.push({ field: "joins", detail: `Dropped join to "${ds.name}" — nothing in the plan's output, filters, or grouping actually uses its columns; keeping it would multiply row counts for no reason.` });
+      if (providesUsedColumn || isBridgeForLaterJoin) continue;
+
+      // An inner join whose columns go unused is not necessarily pointless:
+      // it can be the model's way of expressing "only rows that have a match"
+      // — employees who have a review, orders that have a shipment. Removing
+      // it changes the answer. So an unused join is only dropped when the
+      // relationship shows it would multiply rows (each base key matching
+      // many joined rows); a join that at most filters is the model's call.
+      const priorIds = chain.slice(0, i + 1).map((d) => d.id);
+      const inflates = joinInflatesRows(priorIds, ds.id, keptJoins[i], relationships);
+      const isLeft = keptJoins[i].type === "left";
+      if (isLeft || inflates) {
+        repairs.push({
+          field: "joins",
+          detail: isLeft
+            ? `Dropped left join to "${ds.name}" — nothing in the plan uses its columns, and a left join adds no rows, so it changes nothing.`
+            : `Dropped join to "${ds.name}" — nothing in the plan uses its columns, and each row would match several rows there, multiplying every count and sum.`,
+        });
         keptJoins.splice(i, 1);
         chain.splice(i + 1, 1);
       }
@@ -714,6 +751,25 @@ function isLikelyMeasure(column: string, plan: QueryPlan): boolean {
   return (plan.aggregations ?? []).some((a) => (a.as ?? `${a.fn}_${a.column}`) === column);
 }
 
+/**
+ * Adds a joined dataset's columns to the set a plan may reference, under the
+ * names the join executor will actually give them. A joined column whose
+ * name already exists is renamed "<prefix>_<name>" at execution time; this
+ * used to skip such columns entirely, so the renamed one was unreachable —
+ * a plan asking for it exactly right was rejected as an unknown column, and
+ * the only way to reference the second file's "amount" did not exist.
+ */
+function addJoinedColumns(availableColumns: ColumnSchema[], joined: ValidatorDataset, rightOn: string | undefined): void {
+  const prefix = joinPrefix(joined.name);
+  for (const col of joined.columns) {
+    // The key itself is not carried across (its value is already present as
+    // the base's join column); keep the previous behaviour for it.
+    const collides = col.name !== rightOn && availableColumns.some((c) => c.name === col.name);
+    const name = collides ? `${prefix}_${col.name}` : col.name;
+    if (!availableColumns.some((c) => c.name === name)) availableColumns.push({ ...col, name });
+  }
+}
+
 // A column the plan needs (aggregation target, implied groupBy dimension)
 // can live in a dataset the plan never joined at all. If some relationship
 // connects that dataset to one already in the plan, pull it in — mutating
@@ -730,6 +786,11 @@ function autoIncludeDatasetWithColumn(
   repaired: QueryPlan,
   repairs: PlanRepair[]
 ): string | undefined {
+  // Every file that could supply the column AND is reachable from the plan.
+  // Taking the first one used to mean upload order decided which file's
+  // "amount" a question got. With several candidates there is no principled
+  // choice to make here, so none is made — the gap is reported instead.
+  const candidates: { ds: ValidatorDataset; col: string; rel: NonNullable<ReturnType<typeof bestRelationshipAmong>> }[] = [];
   for (const ds of datasets) {
     if (includedIds.includes(ds.id)) continue;
     const col = resolveColumn(columnName, ds.columns);
@@ -738,18 +799,27 @@ function autoIncludeDatasetWithColumn(
     if (preferType && colSchema?.type !== preferType) continue;
     const rel = bestRelationshipAmong(includedIds, ds.id, relationships);
     if (!rel) continue;
-
-    repaired.joins = [...(repaired.joins ?? []), { datasetId: ds.id, leftOn: rel.leftOn, rightOn: rel.rightOn, type: "inner" }];
-    joinedDatasets.push(ds);
-    includedIds.push(ds.id);
-    for (const c of ds.columns) if (!availableColumns.some((a) => a.name === c.name)) availableColumns.push(c);
+    candidates.push({ ds, col, rel });
+  }
+  if (candidates.length === 0) return undefined;
+  if (candidates.length > 1) {
     repairs.push({
       field: "joins",
-      detail: `Question needs "${col}" from "${ds.name}", which the plan never joined → added join to "${ds.name}" (${rel.leftOn} = ${rel.rightOn}, detected by ${rel.basis}).`,
+      detail: `"${columnName}" exists in ${candidates.map((c) => `"${c.ds.name}"`).join(" and ")}, none of which the plan joined — not guessing which one was meant.`,
     });
-    return col;
+    return undefined;
   }
-  return undefined;
+
+  const { ds, col, rel } = candidates[0];
+  repaired.joins = [...(repaired.joins ?? []), { datasetId: ds.id, leftOn: rel.leftOn, rightOn: rel.rightOn, type: "inner" }];
+  joinedDatasets.push(ds);
+  includedIds.push(ds.id);
+  addJoinedColumns(availableColumns, ds, rel.rightOn);
+  repairs.push({
+    field: "joins",
+    detail: `Question needs "${col}" from "${ds.name}", which the plan never joined → added join to "${ds.name}" (${rel.leftOn} = ${rel.rightOn}, detected by ${rel.basis}).`,
+  });
+  return col;
 }
 
 const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -784,7 +854,7 @@ function resolveDatasetRef(ref: string | undefined, datasets: ValidatorDataset[]
 }
 
 /** Every column name the plan actually references, anywhere. */
-function referencedColumns(plan: QueryPlan): string[] {
+export function referencedColumns(plan: QueryPlan): string[] {
   return [
     ...(plan.aggregations ?? []).filter((a) => a.fn !== "count").map((a) => a.column),
     ...(plan.groupBy ?? []),
@@ -813,8 +883,29 @@ function findBetterBase(
   if (referenced.length === 0) return undefined;
 
   const hasColumn = (d: ValidatorDataset, name: string) => Boolean(resolveColumn(name, d.columns));
-  const fromBase = referenced.filter((c) => hasColumn(base, c));
-  if (fromBase.length > 0) return undefined; // base contributes → leave it alone
+
+  // Everything the base is asked to supply — including the column being
+  // counted and the key it joins on. Neither is in referencedColumns (count
+  // tolerates a placeholder column; join keys aren't output columns), and
+  // ignoring them once made a base that supplied both look like it supplied
+  // nothing: a correct tickets → employees → departments plan was re-based
+  // onto the six-row departments file and answered "1 ticket".
+  const baseContributes = [
+    ...referenced,
+    ...(plan.aggregations ?? []).filter((a) => a.fn === "count").map((a) => a.column),
+    ...(plan.joins ?? []).map((j) => j.leftOn ?? j.on),
+  ].filter((c): c is string => Boolean(c) && hasColumn(base, c as string));
+  if (baseContributes.length > 0) return undefined; // base contributes → leave it alone
+
+  // A plan that explicitly joins its way to the columns it needs has chosen
+  // its base on purpose. Only a plan with no route to those columns is a
+  // candidate for re-basing; the join step deals with joins that don't resolve.
+  const joinedColumns: ColumnSchema[] = (plan.joins ?? []).flatMap(
+    (j) => datasets.find((d) => d.id === j.datasetId || d.name === j.datasetId)?.columns ?? []
+  );
+  if (joinedColumns.length > 0 && referenced.every((c) => resolveColumn(c, joinedColumns))) {
+    return undefined;
+  }
 
   const scored = datasets
     .filter((d) => d.id !== base.id)
@@ -862,6 +953,34 @@ function bestRelationshipAmong(
   const rel = scored.reduce((best, c) => (c.score > best.score ? c : best)).rel;
   const otherIsA = rel.datasetIdA === otherId;
   return { leftOn: otherIsA ? rel.columnB : rel.columnA, rightOn: otherIsA ? rel.columnA : rel.columnB, basis: rel.basis };
+}
+
+/**
+ * Whether joining `joinedId` onto the datasets already in play would give a
+ * single row several matches, from the detected relationship's cardinality
+ * read in the direction of this join. Unknown cardinality (a session stored
+ * before it was recorded) is treated as inflating, so the older, stricter
+ * pruning behaviour is kept where there's no evidence either way.
+ */
+function joinInflatesRows(
+  priorIds: string[],
+  joinedId: string,
+  join: { leftOn?: string; rightOn?: string; on?: string },
+  relationships: RelationshipRecord[]
+): boolean {
+  const leftOn = join.leftOn ?? join.on;
+  const rightOn = join.rightOn ?? join.on;
+  const rel = relationships.find(
+    (r) =>
+      (priorIds.includes(r.datasetIdA) && r.datasetIdB === joinedId && r.columnA === leftOn && r.columnB === rightOn) ||
+      (priorIds.includes(r.datasetIdB) && r.datasetIdA === joinedId && r.columnB === leftOn && r.columnA === rightOn)
+  );
+  if (!rel?.cardinality) return true;
+  const joinedIsA = rel.datasetIdA === joinedId;
+  const [sideA, sideB] = rel.cardinality.split(":");
+  const joinedSide = joinedIsA ? sideA : sideB;
+  // The joined side repeating each key ("N") is what turns one row into many.
+  return joinedSide === "N" || joinedSide === "M";
 }
 
 function looksLikeEntityKey(column: string): boolean {

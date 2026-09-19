@@ -1,6 +1,7 @@
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { ColumnSchema } from "./types";
+import { normalizeKey } from "./keys";
 import { inferColumnType, looksLikeDate } from "./utils";
 
 export interface ParsedFile {
@@ -82,7 +83,25 @@ function buildParsedFile(headers: string[], rows: Record<string, string>[]): Par
     const values = rows.map((r) => String(r[name] ?? ""));
     const type = inferColumnType(values);
     const nullable = values.some((v) => v === "" || v === "null" || v === "undefined");
-    return { name, type, nullable, sample: values.slice(0, 3) };
+
+    // Profiled once, here, because this is the only place every file passes
+    // through. Uniqueness is what distinguishes the "one" side of a
+    // relationship from a column that merely shares a name with another
+    // file's — without it, an id column with one row per entity and an id
+    // column with six rows per entity look identical.
+    const keys = values.map(normalizeKey);
+    const present = keys.filter((k): k is string => k !== null);
+    const distinct = new Set(present);
+
+    return {
+      name,
+      type,
+      nullable,
+      sample: values.slice(0, 3),
+      distinctCount: distinct.size,
+      nullCount: keys.length - present.length,
+      isUnique: present.length > 0 && distinct.size === present.length,
+    };
   });
 
   // Coerce cell values to their inferred type so the query engine can do

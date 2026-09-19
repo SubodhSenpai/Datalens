@@ -5,6 +5,19 @@ export interface ColumnSchema {
   type: "string" | "number" | "boolean" | "date" | "unknown";
   nullable: boolean;
   sample: string[];
+
+  // ── Profile (optional: absent on datasets parsed before profiling existed,
+  // so every consumer must treat these as hints, never as guarantees) ──────
+  /** Distinct non-blank values, compared as join keys (see keys.ts). */
+  distinctCount?: number;
+  /** Rows whose value is blank or a "no value" placeholder. */
+  nullCount?: number;
+  /**
+   * Every non-blank value occurs exactly once — i.e. this column is a
+   * candidate key. This is what lets the system tell a real "one" side of a
+   * relationship from a column that merely shares a name.
+   */
+  isUnique?: boolean;
 }
 
 export interface DatasetFile {
@@ -262,7 +275,11 @@ export interface AppState {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-export const MAX_FILES = 10;
+// A real analysis easily spans more than ten files, and the upload route
+// refuses a WHOLE batch that would cross this line — so a low cap quietly
+// turns "upload these twelve files" into ten files plus a banner. The
+// session size cap below is what actually protects memory.
+export const MAX_FILES = 25;
 export const MAX_FILE_SIZE_MB = 25;
 export const MAX_SESSION_SIZE_MB = 100;
 export const SUPPORTED_FORMATS = [".csv", ".xlsx", ".xls"];

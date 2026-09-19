@@ -78,6 +78,32 @@ export interface QueryResult {
   // Transparency: exactly which files/columns/operations produced this
   // answer, so the user can judge it instead of trusting it blindly.
   source?: QuerySource;
+
+  // The full server-side pipeline, step by step (question → prompt → LLM →
+  // repairs → joins → execution → explanation), for inspecting what actually
+  // happened rather than only what came out.
+  trace?: PipelineStep[];
+
+  /** Pandas equivalent of the executed plan — the same operations, as runnable code. */
+  pandasCode?: string;
+}
+
+export interface PipelineStep {
+  /** Stable key for the stage: "input" | "prompt" | "llm" | "validate" | "join" | "guard" | "execute" | "explain". */
+  id: string;
+  label: string;
+  status: "ok" | "warn" | "skipped";
+  /** One-line result of this stage. */
+  summary: string;
+  /** Longer free text (e.g. the exact prompt, or each repair on its own line). */
+  detail?: string;
+  /** Structured payload (e.g. the raw LLM plan JSON) rendered as formatted code. */
+  payload?: unknown;
+  /** Heading for the payload block, so "parsed plan" vs "final plan" is unambiguous. */
+  payloadLabel?: string;
+  ms?: number;
+  rowsIn?: number;
+  rowsOut?: number;
 }
 
 export interface QuerySource {

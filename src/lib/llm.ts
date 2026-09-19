@@ -10,6 +10,23 @@ export interface DatasetSchemaContext {
   columns: ColumnSchema[];
 }
 
+/**
+ * Optional out-param for observing an LLM call from the outside: the exact
+ * prompt sent, the raw text that came back, which model in the chain
+ * actually answered, and whether it fell back to the deterministic planner.
+ * Passed in and filled in place so existing callers that don't care are
+ * unaffected.
+ */
+export interface LlmCallTrace {
+  model?: string;
+  systemPrompt?: string;
+  userPrompt?: string;
+  rawResponse?: string;
+  ms?: number;
+  usedHeuristicFallback?: boolean;
+  fallbackReason?: string;
+}
+
 // Open-source models served via OpenRouter (OpenAI-compatible API), per the
 // assignment's "use open-source AI models" constraint. The primary model is
 // configurable (OPENROUTER_MODEL) — a fully-free ":free" model sits on a
@@ -65,12 +82,18 @@ function isRateLimited(err: unknown): boolean {
 // (each key has its own rate-limit bucket, so a second key is a real way
 // past a 429 on the model you actually asked for) before dropping down to
 // a different fallback model at all.
-async function completeJson(clients: OpenAI[], system: string, userMessage: string, maxTokens: number): Promise<string> {
+async function completeJson(
+  clients: OpenAI[],
+  system: string,
+  userMessage: string,
+  maxTokens: number
+): Promise<{ text: string; model: string }> {
   let lastErr: unknown;
   for (const model of MODEL_CHAIN) {
     for (const client of clients) {
       try {
-        return await completeJsonWithModel(client, model, system, userMessage, maxTokens);
+        const text = await completeJsonWithModel(client, model, system, userMessage, maxTokens);
+        return { text, model };
       } catch (err) {
         lastErr = err;
         // Only move on to the next key/model for capacity-related failures
@@ -144,10 +167,17 @@ export async function planQuery(
   datasets: DatasetSchemaContext[],
   relationships: RelationshipRecord[],
   ambiguities: AmbiguityWarning[] = [],
-  userApiKey?: string
+  userApiKey?: string,
+  trace?: LlmCallTrace
 ): Promise<QueryPlan> {
   const clients = getClients(userApiKey);
-  if (clients.length === 0) return heuristicPlan(question, datasets, relationships);
+  if (clients.length === 0) {
+    if (trace) {
+      trace.usedHeuristicFallback = true;
+      trace.fallbackReason = "No API key configured (neither a server key nor one set in the browser), so the deterministic keyword planner ran instead of an LLM.";
+    }
+    return heuristicPlan(question, datasets, relationships);
+  }
 
   const schemaContext = datasets.map((d) => ({
     id: d.id,
@@ -204,16 +234,38 @@ This system only aggregates and summarizes data that already exists — it has n
     : "";
   const userMessage = `Datasets:\n${JSON.stringify(schemaContext, null, 2)}\n\nRelationships:\n${JSON.stringify(relationships, null, 2)}${ambiguityLine}\n\nQuestion: ${question}`;
 
+  if (trace) {
+    trace.systemPrompt = system;
+    trace.userPrompt = userMessage;
+  }
+
+  const started = Date.now();
   try {
-    const text = await completeJson(clients, system, userMessage, 600);
+    const { text, model } = await completeJson(clients, system, userMessage, 600);
+    if (trace) {
+      trace.model = model;
+      trace.rawResponse = text;
+      trace.ms = Date.now() - started;
+    }
     const plan = extractJson<QueryPlan>(text);
-    if (!plan || !plan.datasetId) return heuristicPlan(question, datasets, relationships);
+    if (!plan || !plan.datasetId) {
+      if (trace) {
+        trace.usedHeuristicFallback = true;
+        trace.fallbackReason = "The model's response could not be parsed as a valid plan (no JSON object with a datasetId), so the deterministic keyword planner ran instead.";
+      }
+      return heuristicPlan(question, datasets, relationships);
+    }
     return plan;
   } catch (err) {
     // The provider (rate limit, out-of-credits, transient outage) failing
     // shouldn't take the whole app down — degrade to the deterministic
     // keyword planner rather than surfacing a raw API error to the user.
     console.error("planQuery: OpenRouter call failed, falling back to heuristic planner:", err);
+    if (trace) {
+      trace.ms = Date.now() - started;
+      trace.usedHeuristicFallback = true;
+      trace.fallbackReason = `Every model/key in the chain failed (${err instanceof Error ? err.message : String(err)}), so the deterministic keyword planner ran instead.`;
+    }
     return heuristicPlan(question, datasets, relationships);
   }
 }
@@ -226,10 +278,17 @@ export async function explainResults(
   columns: string[],
   correlation?: { columnX: string; columnY: string; coefficient: number; sampleSize: number; interpretation: string },
   unsupportedConcepts: string[] = [],
-  userApiKey?: string
+  userApiKey?: string,
+  trace?: LlmCallTrace
 ): Promise<{ explanation: string; followUpSuggestions: string[] }> {
   const clients = getClients(userApiKey);
-  if (clients.length === 0) return heuristicExplanation(question, resultRows, columns);
+  if (clients.length === 0) {
+    if (trace) {
+      trace.usedHeuristicFallback = true;
+      trace.fallbackReason = "No API key configured, so a plain templated summary was used instead of an LLM explanation.";
+    }
+    return heuristicExplanation(question, resultRows, columns);
+  }
 
   const system = `You explain data query results in plain English for a business user. Output ONLY a JSON object: { "explanation": string, "followUpSuggestions": string[] }. Keep the explanation to 2-4 sentences, reference concrete numbers from the data, and suggest 2-3 natural follow-up questions.
 
@@ -248,13 +307,35 @@ If the question asks for something this data cannot support — forecasting/pred
     : "";
   const userMessage = `Question: ${question}\nColumns: ${columns.join(", ")}\nTotal result rows: ${resultRows.length}\nResult rows (preview, first ${preview.length} of ${resultRows.length}): ${JSON.stringify(preview)}${correlationLine}${limitsLine}`;
 
+  if (trace) {
+    trace.systemPrompt = system;
+    trace.userPrompt = userMessage;
+  }
+
+  const started = Date.now();
   try {
-    const text = await completeJson(clients, system, userMessage, 512);
+    const { text, model } = await completeJson(clients, system, userMessage, 512);
+    if (trace) {
+      trace.model = model;
+      trace.rawResponse = text;
+      trace.ms = Date.now() - started;
+    }
     const parsed = extractJson<{ explanation: string; followUpSuggestions: string[] }>(text);
-    if (!parsed) return heuristicExplanation(question, resultRows, columns);
+    if (!parsed) {
+      if (trace) {
+        trace.usedHeuristicFallback = true;
+        trace.fallbackReason = "The model's response could not be parsed as JSON, so a plain templated summary was used.";
+      }
+      return heuristicExplanation(question, resultRows, columns);
+    }
     return parsed;
   } catch (err) {
     console.error("explainResults: OpenRouter call failed, falling back to heuristic explanation:", err);
+    if (trace) {
+      trace.ms = Date.now() - started;
+      trace.usedHeuristicFallback = true;
+      trace.fallbackReason = `Every model/key in the chain failed (${err instanceof Error ? err.message : String(err)}), so a plain templated summary was used.`;
+    }
     return heuristicExplanation(question, resultRows, columns);
   }
 }

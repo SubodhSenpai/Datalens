@@ -5,11 +5,12 @@ import {
   Clock, AlertCircle, Loader2, BarChart3, Table2,
   MessageSquare, ChevronDown, ChevronUp, RefreshCw, Sparkles,
   CheckCircle2, XCircle, FileSearch, FileText, GitMerge, Filter,
-  Layers, Sigma, ArrowUpDown,
+  Layers, Sigma, ArrowUpDown, Workflow,
 } from "lucide-react";
 import { QueryResult } from "@/lib/types";
 import DataTable from "./DataTable";
 import ChartView from "./ChartView";
+import PipelineTrace from "./PipelineTrace";
 
 interface ResultsPanelProps {
   result: QueryResult;
@@ -18,7 +19,7 @@ interface ResultsPanelProps {
   onFollowUp: (question: string) => void;
 }
 
-type Tab = "table" | "chart" | "explanation" | "source";
+type Tab = "table" | "chart" | "explanation" | "source" | "trace";
 
 export default function ResultsPanel({ result, isActive, onClick, onFollowUp }: ResultsPanelProps) {
   const [activeTab, setActiveTab]     = useState<Tab>("table");
@@ -28,12 +29,14 @@ export default function ResultsPanel({ result, isActive, onClick, onFollowUp }: 
   const hasChart       = result.chartData && result.chartData.length > 0 && result.chartType !== "none";
   const hasExplanation = !!result.explanation;
   const hasSource      = !!result.source;
+  const hasTrace       = (result.trace?.length ?? 0) > 0;
 
   const tabs: { key: Tab; label: string; icon: React.ReactNode; show: boolean }[] = [
     { key: "table",       label: "Table",   icon: <Table2 size={13} />,      show: hasTable },
     { key: "chart",       label: "Chart",   icon: <BarChart3 size={13} />,   show: !!hasChart },
     { key: "explanation", label: "Explain", icon: <MessageSquare size={13} />, show: hasExplanation },
     { key: "source",      label: "Source",  icon: <FileSearch size={13} />,  show: hasSource },
+    { key: "trace",       label: "Steps",   icon: <Workflow size={13} />,    show: hasTrace },
   ];
   const visibleTabs = tabs.filter(t => t.show);
 
@@ -96,13 +99,21 @@ export default function ResultsPanel({ result, isActive, onClick, onFollowUp }: 
 
           {/* Error */}
           {result.status === "error" && (
-            <div className="flex items-start gap-3 px-5 py-5 bg-terracotta/20 border-t-2 border-ink">
-              <AlertCircle size={18} className="shrink-0 mt-0.5" />
-              <div>
-                <strong className="block text-sm mb-1">Something went wrong</strong>
-                <p className="text-[13px] text-text-secondary font-medium">{result.errorMessage}</p>
+            <>
+              <div className="flex items-start gap-3 px-5 py-5 bg-terracotta/20 border-t-2 border-ink">
+                <AlertCircle size={18} className="shrink-0 mt-0.5" />
+                <div>
+                  <strong className="block text-sm mb-1">Something went wrong</strong>
+                  <p className="text-[13px] text-text-secondary font-medium">{result.errorMessage}</p>
+                </div>
               </div>
-            </div>
+              {/* However far it got still tells you where it broke. */}
+              {hasTrace && (
+                <div className="px-5 py-4 border-t-2 border-ink">
+                  <PipelineTrace steps={result.trace!} />
+                </div>
+              )}
+            </>
           )}
 
           {/* Success */}
@@ -187,7 +198,16 @@ export default function ResultsPanel({ result, isActive, onClick, onFollowUp }: 
                     </div>
                   </div>
                 )}
-                {!hasTable && !hasChart && !hasExplanation && !hasSource && (
+                {activeTab === "trace" && hasTrace && (
+                  <div className="flex flex-col gap-3">
+                    <p className="text-[12px] font-medium text-text-secondary leading-relaxed">
+                      Everything the server did for this question, in order. Click any step to see the exact
+                      prompt, the model&apos;s raw reply, or the operations that ran.
+                    </p>
+                    <PipelineTrace steps={result.trace!} />
+                  </div>
+                )}
+                {!hasTable && !hasChart && !hasExplanation && !hasSource && !hasTrace && (
                   <div className="text-center py-8 text-text-secondary text-sm font-medium">
                     No results. Try rephrasing.
                   </div>

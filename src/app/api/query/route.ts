@@ -6,7 +6,7 @@ import { planToPandas } from "@/lib/pandas-codegen";
 import { executeQueryPlan, joinRows, JoinKeyMissingError } from "@/lib/query-engine";
 import { evaluateChartChoice } from "@/lib/chart-eval";
 import { validateAndRepairPlan, injectMissingValueFilters, correctHallucinatedDateFilterYear, resolveTimeFilters, dropUnsatisfiableRangeFilters, PlanRepair } from "@/lib/plan-validator";
-import { detectUnsupportedConcepts, stripMisleadingAliases } from "@/lib/concept-guard";
+import { detectUnsupportedConcepts, stripMisleadingAliases, detectPlannerHedging } from "@/lib/concept-guard";
 import { detectColumnAmbiguity } from "@/lib/data-dictionary";
 
 export const runtime = "nodejs";
@@ -227,6 +227,11 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // The planner sometimes says outright that it couldn't express the
+    // question and substituted a narrower one. That admission must reach
+    // the user — it's the difference between an approximation and a lie.
+    const hedgeWarning = detectPlannerHedging(plan.reasoning);
+
     trace.push({
       id: "guard",
       label: "Concept guard",
@@ -293,6 +298,7 @@ export async function POST(req: NextRequest) {
         ...(plan.dateBucket ? [`• bucket ${plan.dateBucket.column} by ${plan.dateBucket.granularity}`] : []),
         ...(plan.groupBy?.length ? [`• group by ${plan.groupBy.join(", ")}`] : []),
         ...(plan.aggregations ?? []).map((a) => `• aggregate ${a.fn}(${a.column}) as ${a.as ?? `${a.fn}_${a.column}`}`),
+        ...(plan.having ?? []).map((h) => `• keep only groups where ${h.column} ${h.op} ${JSON.stringify(h.value)}`),
         ...(plan.sort ?? []).map((s) => `• sort ${s.column} ${s.direction}`),
         ...(plan.limit ? [`• limit ${plan.limit}`] : []),
         ...(plan.correlate ? [`• correlate ${plan.correlate.columnX} vs ${plan.correlate.columnY}`] : []),
@@ -350,7 +356,7 @@ export async function POST(req: NextRequest) {
       execution.rows,
       execution.columns,
       execution.correlation,
-      conceptWarnings.map((w) => w.message),
+      [...conceptWarnings.map((w) => w.message), ...(hedgeWarning ? [hedgeWarning] : [])],
       apiKey,
       explainTrace
     );
@@ -405,6 +411,7 @@ export async function POST(req: NextRequest) {
         // Stated by us, not left to the model: if the data can't answer the
         // question, that must appear even if the model ignores the prompt.
         ...conceptWarnings.map((w) => `Important: ${w.message}.`),
+        ...(hedgeWarning ? [`Important: ${hedgeWarning}`] : []),
         ...ambiguityNotes.map((n) => `Note: ${n}`),
         explanation,
         ...joinWarnings,

@@ -27,7 +27,7 @@ const OP_TO_PANDAS: Record<string, string> = {
 // differently. Emitting "avg" here would print code that raises at runtime,
 // which defeats the point of showing it.
 const AGG_TO_PANDAS: Record<string, string> = {
-  sum: "sum", avg: "mean", count: "count", min: "min", max: "max",
+  sum: "sum", avg: "mean", count: "count", countDistinct: "nunique", min: "min", max: "max",
 };
 
 /**
@@ -106,6 +106,13 @@ export function planToPandas(plan: QueryPlan, datasets: PandasDatasetName[]): st
       const items = (plan.aggregations ?? [])
         .map((a) => `  ${quote(a.as ?? `${a.fn}_${a.column}`)}: [${base}[${quote(a.column)}].${AGG_TO_PANDAS[a.fn] ?? a.fn}()],`);
       lines.push("", "result = pd.DataFrame({", ...items, "})");
+    }
+    for (const h of plan.having ?? []) {
+      if (h.op === "contains") {
+        lines.push(`result = result[result[${quote(h.column)}].astype(str).str.contains(${quote(String(h.value))}, case=False, na=False)]`);
+      } else {
+        lines.push(`result = result[result[${quote(h.column)}] ${OP_TO_PANDAS[h.op] ?? "=="} ${quote(h.value)}]`);
+      }
     }
     result = "result";
   } else if (plan.select?.length) {

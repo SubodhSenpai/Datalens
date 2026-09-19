@@ -298,6 +298,21 @@ export function executeQueryPlan(rows: Record<string, unknown>[], plan: QueryPla
       if (aggs.length === 0) out["count"] = groupRows.length;
       return out;
     });
+
+    // HAVING: filter the GROUPS by their aggregate values. Runs here, after
+    // aggregation, because these conditions are about the group as a whole
+    // ("had 4+ in both cycles") and are meaningless per row.
+    if (plan.having?.length) {
+      const producedColumns = new Set(resultRows.length > 0 ? Object.keys(resultRows[0]) : []);
+      for (const h of plan.having) {
+        if (!producedColumns.has(h.column)) {
+          warnings.push(`Ignored "having" on "${h.column}" — the grouped result has no such column.`);
+          continue;
+        }
+        resultRows = resultRows.filter((row) => applyFilter(row[h.column], h));
+      }
+    }
+
     resultColumns = resultRows.length > 0 ? Object.keys(resultRows[0]) : [...groupCols];
   } else {
     resultRows = working;
@@ -411,6 +426,18 @@ function groupRows(rows: Record<string, unknown>[], groupCols: string[]): Record
 
 function computeAggregate(rows: Record<string, unknown>[], agg: QueryAggregation): number {
   if (agg.fn === "count") return rows.length;
+  // Distinct count works on ANY column type (it's the only aggregate that
+  // means something over strings), and is what "how many employees" wants
+  // when a table has several rows per employee — plain count would report
+  // the row count instead.
+  if (agg.fn === "countDistinct") {
+    const seen = new Set<string>();
+    for (const r of rows) {
+      const v = r[agg.column];
+      if (v !== null && v !== undefined && v !== "") seen.add(String(v));
+    }
+    return seen.size;
+  }
   const nums = rows.map((r) => Number(r[agg.column])).filter((n) => !Number.isNaN(n));
   if (nums.length === 0) return 0;
   switch (agg.fn) {

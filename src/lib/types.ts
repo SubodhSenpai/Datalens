@@ -155,7 +155,7 @@ export interface ChartConfig {
 // ─── Query Plan (LLM Query Planner output) ────────────────────────────────────
 
 export type FilterOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "contains";
-export type AggregateFn = "sum" | "avg" | "count" | "min" | "max";
+export type AggregateFn = "sum" | "avg" | "count" | "countDistinct" | "min" | "max";
 
 export interface QueryDerivedColumn {
   as: string;
@@ -212,6 +212,13 @@ export interface QueryPlan {
   dateBucket?: QueryDateBucket;
   groupBy?: string[];
   aggregations?: QueryAggregation[];
+  /**
+   * Filters applied AFTER grouping, against the aggregate results (SQL
+   * HAVING). Needed for "groups that satisfy a condition" questions —
+   * "employees rated 4+ in both cycles", "departments averaging over X" —
+   * which a row-level filter fundamentally cannot express.
+   */
+  having?: QueryFilter[];
   /** Set when the question asks about correlation/relationship strength between two numeric columns. */
   correlate?: QueryCorrelation;
   sort?: QuerySort[];

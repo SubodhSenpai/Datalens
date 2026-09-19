@@ -1,7 +1,7 @@
 import { ColumnSchema, FilterOp, QueryPlan } from "./types";
+import { RelationshipRecord } from "./session-store";
 
 const VALID_FILTER_OPS: FilterOp[] = ["eq", "neq", "gt", "gte", "lt", "lte", "contains"];
-import { RelationshipRecord } from "./session-store";
 
 export interface ValidatorDataset {
   id: string;
@@ -63,9 +63,9 @@ export function validateAndRepairPlan(
   // The strongest signal of a mis-picked base: not one column the plan
   // references exists in it. Joining the real table in (the old behavior)
   // "works" but silently rescopes the question to whatever rows the wrong
-  // base happens to contain — e.g. a 10-row file joined to payroll answers
-  // "total net pay" for 10 people and looks entirely plausible. Switching
-  // the base instead is both correct and visible.
+  // base happens to contain — a tiny unrelated file joined to the real fact
+  // table answers the question for a handful of rows and looks entirely
+  // plausible. Switching the base instead is both correct and visible.
   {
     const chosen = byId.get(repaired.datasetId);
     if (chosen) {
@@ -251,7 +251,7 @@ export function validateAndRepairPlan(
       // plan, pull it in rather than silently dropping the whole aggregation.
       if (!col) {
         col = autoIncludeDatasetWithColumn(
-          a.column, "number", datasets, includedIds, relationships,
+          a.column, a.fn === "countDistinct" ? undefined : "number", datasets, includedIds, relationships,
           availableColumns, joinedDatasets, repaired, repairs
         );
       }
@@ -259,6 +259,9 @@ export function validateAndRepairPlan(
         repairs.push({ field: "aggregations", detail: `Dropped ${a.fn} on unknown column "${a.column}".` });
         continue;
       }
+      // countDistinct is the one aggregate that's meaningful over any type —
+      // "how many distinct review cycles / departments / statuses".
+      if (a.fn === "countDistinct") { kept.push({ ...a, column: col }); continue; }
       // sum/avg/min/max over a non-numeric column is meaningless and
       // silently evaluates to 0, which then gets presented as a real
       // figure (e.g. "avg of region").
@@ -328,7 +331,7 @@ export function validateAndRepairPlan(
   // ── 4b. Drop joins nothing in the final plan actually uses ──────────────
   // A join whose dataset connects to another one in the plan by a real
   // relationship can still be UNNECESSARY for this specific question — e.g.
-  // two sheets of the same workbook that share emp_id but the question only
+  // two sheets of the same workbook that share a key but the question only
   // needs one of them. Joining anyway multiplies every row (and every sum)
   // by however many matches the join produces. Processed in reverse so a
   // join kept only because a LATER join depends on its columns isn't pruned
@@ -370,6 +373,29 @@ export function validateAndRepairPlan(
 
   // ── 5. Predict output columns, then make the chart point at them ────────
   const predictedColumns = predictOutputColumns(repaired, availableNames, bucketAlias);
+
+  // "having" runs against the GROUPED result, so its columns must be ones
+  // the aggregation actually produces (an alias or a group key) — not raw
+  // source columns, which no longer exist at that point.
+  if (repaired.having?.length) {
+    if (!repaired.groupBy?.length && !repaired.aggregations?.length) {
+      repairs.push({ field: "having", detail: `Dropped "having" — it filters grouped results, but this plan doesn't group or aggregate anything.` });
+      repaired.having = undefined;
+    } else {
+      const kept = [];
+      for (const h of repaired.having) {
+        const match = predictedColumns.find((c) => c === h.column)
+          ?? predictedColumns.find((c) => c.toLowerCase() === h.column.toLowerCase())
+          ?? predictedColumns.find((c) => normalize(c) === normalize(h.column));
+        if (!match) {
+          repairs.push({ field: "having", detail: `Dropped "having" on "${h.column}" — the grouped result produces [${predictedColumns.join(", ")}], so there is nothing by that name to filter on.` });
+          continue;
+        }
+        kept.push({ ...h, column: match });
+      }
+      repaired.having = kept.length > 0 ? kept : undefined;
+    }
+  }
 
   if (repaired.chartType && repaired.chartType !== "none") {
     const x = repaired.chartX && predictedColumns.includes(repaired.chartX)
@@ -747,8 +773,9 @@ function resolveDatasetRef(ref: string | undefined, datasets: ValidatorDataset[]
   const loose = datasets.find((d) => normalize(d.name) === normalize(ref));
   if (loose) return loose;
 
-  // "payroll.xlsx" when the datasets are "payroll.xlsx — Payroll_2025" and
-  // "payroll.xlsx — Bonus": only accept it if exactly one candidate matches,
+  // a bare workbook name when the datasets are its individual sheets
+  // ("book.xlsx" vs "book.xlsx — Sheet1"): only accept it if exactly one
+  // candidate matches,
   // so an ambiguous prefix isn't silently resolved to the wrong sheet.
   const partial = datasets.filter(
     (d) => normalize(d.name).includes(normalize(ref)) || normalize(ref).includes(normalize(d.name))

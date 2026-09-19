@@ -88,6 +88,41 @@ export function detectUnsupportedConcepts(question: string, columns: ColumnSchem
  * support — the "sum(total_amount) AS total_profit" case. The number stays;
  * the label stops lying about what it is.
  */
+// Hedging in the planner's own reasoning, grouped by what it signals rather
+// than by any particular wording: an inability to express the question, a
+// deliberate substitution, an assumption being made, or an acknowledged
+// ambiguity/limitation. Built from word stems so it catches the idea
+// however a given model happens to phrase it.
+const PLANNER_HEDGE = new RegExp(
+  [
+    // "cannot express / can't be represented / unable to compute ..."
+    String.raw`\b(?:can'?t|cannot|can not|unable to|not possible to|no way to|isn'?t possible)\b[^.]{0,40}\b(?:express|represent|compute|capture|model|do|answer|support)\w*`,
+    // "not directly expressible / not representable ..."
+    String.raw`\bnot\b[^.]{0,20}\b(?:expressible|representable|supported|available|answerable)\b`,
+    // substituting a different answer
+    String.raw`\b(?:approximat\w+|closest\b[^.]{0,20}\banswer|as a proxy|proxy for|best effort|fall(?:ing)? back to|instead of what)\b`,
+    // stating an assumption
+    String.raw`\b(?:i'?ll assume|i am assuming|i'?m assuming|assuming that|we assume)\b`,
+    // acknowledging ambiguity or a limitation
+    String.raw`\b(?:given the ambiguity|ambiguous|ambiguity|this is a limitation|due to the limitation)\b`,
+  ].join("|"),
+  "i"
+);
+
+/**
+ * Detects the planner conceding, in its own `reasoning`, that the plan
+ * answers something other than what was asked. That admission is the single
+ * most valuable honesty signal available — it comes from the component that
+ * actually knows what it could and couldn't express — and silently dropping
+ * it turns a known approximation into a confident wrong answer.
+ */
+export function detectPlannerHedging(reasoning: string | undefined): string | undefined {
+  if (!reasoning) return undefined;
+  const match = reasoning.match(PLANNER_HEDGE);
+  if (!match) return undefined;
+  return `The query planner flagged that it could not express this question exactly and answered a narrower one instead (it said: "${match[0]}"). Treat the number below as an approximation of the question you asked, not a direct answer to it — check the Steps tab for the operations that actually ran.`;
+}
+
 export function stripMisleadingAliases(
   aggregations: { column: string; fn: string; as?: string }[] | undefined,
   warnings: ConceptWarning[]

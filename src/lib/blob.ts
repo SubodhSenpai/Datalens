@@ -88,7 +88,12 @@ export async function saveBlobJson(pathname: string, data: unknown, opts?: { eta
         access: "private",
         contentType: "application/json",
         addRandomSuffix: false,
-        allowOverwrite: !opts?.etag,
+        // allowOverwrite must be true any time we're writing to a STABLE
+        // pathname a second time, whether or not this particular write is
+        // conditional — the SDK now rejects allowOverwrite:false paired
+        // with ifMatch as contradictory (ifMatch's job is deciding WHETHER
+        // the overwrite proceeds, not whether overwriting is allowed at all).
+        allowOverwrite: true,
         ifMatch: opts?.etag,
       });
       return blob.etag;

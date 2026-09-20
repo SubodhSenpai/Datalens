@@ -13,6 +13,13 @@ const SAMPLE_ROW_CAP = 2000;
  */
 const MIN_NAME_MATCH_OVERLAP = 0.05;
 
+/**
+ * Below this many distinct values a non-unique column is a category, not a
+ * key. Twenty distinct values is already more than any status/type/group
+ * vocabulary and far fewer than any real identifier column.
+ */
+const MIN_KEY_CARDINALITY = 20;
+
 interface ColumnProfile {
   column: ColumnSchema;
   /** Distinct normalized keys (see keys.ts) — blanks and placeholders excluded. */
@@ -48,7 +55,7 @@ function intersectionSize(a: Set<string>, b: Set<string>): number {
   return count;
 }
 
-/** Same header, ignoring case and punctuation ("Emp ID" ≡ "emp_id"). */
+/** Same header, ignoring case and punctuation ("Member ID" ≡ "member_id"). */
 const canonicalName = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 function cardinalityOf(aUnique: boolean, bUnique: boolean): RelationshipRecord["cardinality"] {
@@ -65,8 +72,8 @@ function cardinalityOf(aUnique: boolean, bUnique: boolean): RelationshipRecord["
  * largely contained in the first).
  *
  * The previous version matched on column name + type alone. That could not
- * distinguish `employees.emp_id` (one row per employee) from
- * `payroll.emp_id` (six rows per employee), so every relationship looked
+ * distinguish `members.member_id` (one row per member) from
+ * `loans.member_id` (six rows per member), so every relationship looked
  * equally safe to join and a many-to-many pair silently multiplied every sum
  * it touched. Recording which side is unique is what makes fan-out
  * detectable at all.
@@ -141,6 +148,16 @@ export async function detectRelationships(datasets: DatasetRecord[]): Promise<Re
           } else if (strongest < VALUE_OVERLAP_THRESHOLD || shared < MIN_OVERLAP_COUNT) {
             continue;
           }
+
+          // Key-ness. A join key identifies rows: at least one side holds
+          // each value once, or both sides carry many distinct values. Two
+          // low-cardinality columns that merely share a vocabulary (a
+          // "status" or "group" with the same four values in twenty files)
+          // are a category, not a relationship — and with many files such
+          // pairs outnumber the real keys ten to one, poisoning every join
+          // decision made from the graph.
+          const looksLikeKey = pa.unique || pb.unique || (pa.keys.size >= MIN_KEY_CARDINALITY && pb.keys.size >= MIN_KEY_CARDINALITY);
+          if (!looksLikeKey) continue;
 
           const cardinality = cardinalityOf(pa.unique, pb.unique);
           // The parent is the side holding each key once — the table the

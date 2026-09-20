@@ -58,7 +58,7 @@ const STOPWORDS = new Set([
 const tokenize = (s: string) =>
   s.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !STOPWORDS.has(w));
 
-/** "Emp ID", "emp_id" and "empid" are the same name. */
+/** "Member ID", "member_id" and "memberid" are the same name. */
 const canonical = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 const MAX_WARNINGS = 4;

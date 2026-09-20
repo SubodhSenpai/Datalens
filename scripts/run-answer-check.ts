@@ -93,6 +93,35 @@ for (const c of rateCases) {
   console.log(`${ok ? "PASS" : "FAIL"}  ${c.label}${a.ok ? "" : ` → ${a.problems[0]}`}`);
 }
 
+// "revenue"/"turnover" without a spelled-out formula (the 2.11/3.3 shape —
+// "revenue by product category" never writes the formula the way 1.6 did).
+const revenueCases: { label: string; question: string; plan: QueryPlan; cols: string[]; expectOk: boolean }[] = [
+  { label: "revenue by category, no formula spelled out, wrong column (2.11 shape)",
+    question: "What is total revenue by product category?",
+    plan: { datasetId: "sales_orders.csv", groupBy: ["category"], aggregations: [{ column: "unit_price", fn: "sum", as: "revenue" }] },
+    cols: cols2.concat("category"), expectOk: false },
+  { label: "turnover, same shape",
+    question: "What is our total turnover?",
+    plan: { datasetId: "sales_orders.csv", aggregations: [{ column: "unit_price", fn: "sum", as: "turnover" }] },
+    cols: cols2, expectOk: false },
+  { label: "correct: revenue derived properly",
+    question: "What is total revenue by product category?",
+    plan: { datasetId: "sales_orders.csv", groupBy: ["category"],
+            derive: [{ as: "revenue", expr: "quantity * unit_price * (1 - discount_pct / 100)" }],
+            aggregations: [{ column: "revenue", fn: "sum", as: "total_revenue" }] },
+    cols: cols2.concat("category"), expectOk: true },
+  { label: "'sales' deliberately NOT treated as a value word (genuinely ambiguous)",
+    question: "What is the average sales per region?",
+    plan: { datasetId: "sales_orders.csv", groupBy: ["region_id"], aggregations: [{ column: "unit_price", fn: "avg", as: "avg_sales" }] },
+    cols: cols2, expectOk: true },
+];
+for (const c of revenueCases) {
+  const a = assessPlan(c.question, c.plan, [], c.cols);
+  const ok = a.ok === c.expectOk;
+  if (!ok) bad++;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${c.label}${a.ok ? "" : ` → ${a.problems[0]}`}`);
+}
+
 // The retry block must carry the previous plan, the problems and the hints.
 const a0 = assessPlan(cases[0].question, cases[0].plan, [], cols);
 const fb = retryFeedback(cases[0].plan, a0);
@@ -100,6 +129,6 @@ const fbOk = fb.includes(JSON.stringify(cases[0].plan)) && a0.problems.every((p)
 if (!fbOk) bad++;
 console.log(`${fbOk ? "PASS" : "FAIL"}  retry feedback includes previous plan, problems and hints`);
 
-const total = cases.length + rateCases.length + 1;
+const total = cases.length + rateCases.length + revenueCases.length + 1;
 console.log(`\n${total - bad}/${total} passed`);
 process.exit(bad ? 1 : 0);

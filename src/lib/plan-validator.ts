@@ -2,7 +2,7 @@ import { ColumnSchema, FilterOp, QueryPlan } from "./types";
 import { RelationshipRecord } from "./session-store";
 import { joinPrefix } from "./query-engine";
 
-const VALID_FILTER_OPS: FilterOp[] = ["eq", "neq", "gt", "gte", "lt", "lte", "contains"];
+const VALID_FILTER_OPS: FilterOp[] = ["eq", "neq", "gt", "gte", "lt", "lte", "contains", "isNull", "isNotNull", "in", "notIn"];
 
 export interface ValidatorDataset {
   id: string;
@@ -274,7 +274,7 @@ export function validateAndRepairPlan(
         continue;
       }
       // countDistinct is the one aggregate that's meaningful over any type —
-      // "how many distinct review cycles / departments / statuses".
+      // "how many distinct periods / branches / statuses".
       if (a.fn === "countDistinct") { kept.push({ ...a, column: col }); continue; }
       // sum/avg/min/max over a non-numeric column is meaningless and
       // silently evaluates to 0, which then gets presented as a real
@@ -323,7 +323,7 @@ export function validateAndRepairPlan(
     }
   }
 
-  // A time-series question ("monthly revenue", "trend over time") needs a
+  // A time-series question ("monthly usage", "trend over time") needs a
   // bucketed date dimension. Phrased that way there's no "by <column>" for
   // the rule above to catch, so an aggregation with no time dimension
   // silently answers a 12-month question with one lifetime total.
@@ -387,7 +387,7 @@ export function validateAndRepairPlan(
 
       // An inner join whose columns go unused is not necessarily pointless:
       // it can be the model's way of expressing "only rows that have a match"
-      // — employees who have a review, orders that have a shipment. Removing
+      // — members who have a loan, orders that have a shipment. Removing
       // it changes the answer. So an unused join is only dropped when the
       // relationship shows it would multiply rows (each base key matching
       // many joined rows); a join that at most filters is the model's call.
@@ -484,10 +484,18 @@ const VALUE_SCAN_ROWS = 5000;
 export function injectMissingValueFilters(
   plan: QueryPlan,
   question: string,
-  rows: Record<string, unknown>[]
+  rows: Record<string, unknown>[],
+  /**
+   * Words that also name a column somewhere in scope. A question word that
+   * is both a cell value and a field name ("returned" — a status value, and the
+   * returned_at column) is ambiguous, and guessing "value" silently narrows
+   * the answer. Such words are never injected.
+   */
+  reservedWords: string[] = []
 ): { plan: QueryPlan; repairs: PlanRepair[] } {
   const repairs: PlanRepair[] = [];
   if (rows.length === 0) return { plan, repairs };
+  const reserved = new Set(reservedWords.map((w) => w.toLowerCase()));
 
   const alreadyFiltered = new Set((plan.filters ?? []).map((f) => f.column));
   const sample = rows.slice(0, VALUE_SCAN_ROWS);
@@ -506,7 +514,7 @@ export function injectMissingValueFilters(
     }
     if (distinct.size === 0 || distinct.size > MAX_CATEGORICAL_CARDINALITY) continue;
 
-    const mentioned = Array.from(distinct).filter((v) => v.length >= 3 && mentionsWholeValue(question, v));
+    const mentioned = Array.from(distinct).filter((v) => v.length >= 3 && mentionsWholeValue(question, v) && !reserved.has(v.toLowerCase()));
     if (mentioned.length !== 1) continue; // 0 = not asked for, >1 = ambiguous
 
     injected.push({ column, op: "eq", value: mentioned[0] });
@@ -888,8 +896,8 @@ function findBetterBase(
   // counted and the key it joins on. Neither is in referencedColumns (count
   // tolerates a placeholder column; join keys aren't output columns), and
   // ignoring them once made a base that supplied both look like it supplied
-  // nothing: a correct tickets → employees → departments plan was re-based
-  // onto the six-row departments file and answered "1 ticket".
+  // nothing: a correct loans → members → branches plan was re-based
+  // onto the six-row branches file and answered "1 loan".
   const baseContributes = [
     ...referenced,
     ...(plan.aggregations ?? []).filter((a) => a.fn === "count").map((a) => a.column),

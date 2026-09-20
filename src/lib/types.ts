@@ -18,6 +18,12 @@ export interface ColumnSchema {
    * relationship from a column that merely shares a name.
    */
   isUnique?: boolean;
+  /**
+   * Every distinct value, when there are few enough to list (a status or
+   * category column). Lets a planner filter on values it has actually seen
+   * — "Lost" as well as "Returned" — instead of guessing from three samples.
+   */
+  distinctValues?: string[];
 }
 
 export interface DatasetFile {
@@ -167,7 +173,13 @@ export interface ChartConfig {
 
 // ─── Query Plan (LLM Query Planner output) ────────────────────────────────────
 
-export type FilterOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "contains";
+// isNull / isNotNull make "which X have no Y" answerable: left-join Y, then
+// keep the rows where Y's key is null (an anti-join). Blank cells and
+// "no value" placeholders count as null.
+// in / notIn take a list: "returned or lost" is one filter with two values,
+// which neither eq (one value) nor two eq filters (AND — matches nothing)
+// can express.
+export type FilterOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "contains" | "isNull" | "isNotNull" | "in" | "notIn";
 export type AggregateFn = "sum" | "avg" | "count" | "countDistinct" | "min" | "max";
 
 export interface QueryDerivedColumn {
@@ -179,7 +191,7 @@ export interface QueryDerivedColumn {
 export interface QueryFilter {
   column: string;
   op: FilterOp;
-  value: string | number | boolean;
+  value: string | number | boolean | (string | number)[];
 }
 
 export interface QueryAggregation {
@@ -218,7 +230,7 @@ export interface QueryCorrelation {
 export interface QueryPlan {
   datasetId: string; // base dataset
   joins?: QueryJoin[]; // other datasets to merge in before filtering/aggregating
-  /** Row-level computed columns (e.g. revenue = quantity * unit_price * (1 - discount_pct/100)), evaluated before filters/groupBy/aggregations. */
+  /** Row-level computed columns (e.g. billed = units_used * rate_per_unit * (1 + tax_pct/100)), evaluated before filters/groupBy/aggregations. */
   derive?: QueryDerivedColumn[];
   select?: string[];
   filters?: QueryFilter[];
@@ -228,7 +240,7 @@ export interface QueryPlan {
   /**
    * Filters applied AFTER grouping, against the aggregate results (SQL
    * HAVING). Needed for "groups that satisfy a condition" questions —
-   * "employees rated 4+ in both cycles", "departments averaging over X" —
+   * "members active in both periods", "branches averaging over X" —
    * which a row-level filter fundamentally cannot express.
    */
   having?: QueryFilter[];

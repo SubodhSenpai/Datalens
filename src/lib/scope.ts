@@ -5,9 +5,9 @@
  * answer when the real cause is an unticked box in the file picker.
  *
  * Purely structural: the question's words are compared with the session's
- * own file names. "sales_orders.csv" is mentioned by a question containing
- * both "sales" and "orders"; "payroll.xlsx — Payroll_2025" by one containing
- * "payroll".
+ * own file names. "book_loans.csv" is mentioned by a question containing
+ * both "book" and "loans"; "branches.xlsx — Branches_2025" by one containing
+ * "branches".
  */
 export function findUnselectedMentioned(
   question: string,

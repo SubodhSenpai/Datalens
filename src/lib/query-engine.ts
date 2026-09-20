@@ -171,9 +171,9 @@ function interpretCorrelation(r: number): string {
 
 // ─── Derived (computed) columns ────────────────────────────────────────────
 //
-// Real questions often need a value that isn't a literal column ("revenue"
-// = quantity x unit_price x (1 - discount_pct/100), "profit" = revenue -
-// qty x cost_price). Rather than teach the planner to precompute these in
+// Real questions often need a value that isn't a literal column ("billed"
+// = units_used x rate_per_unit x (1 + tax_pct/100), "margin" = billed -
+// units_used x cost_per_unit). Rather than teach the planner to precompute these in
 // its head — a small model gets the arithmetic wrong under load — it emits
 // a simple expression and this compiles + evaluates it per row. The grammar
 // is deliberately tiny (numbers, existing column names, + - * / and
@@ -422,6 +422,19 @@ const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
 function applyFilter(cellValue: unknown, filter: QueryFilter): boolean {
   const { op, value } = filter;
+  // A cell is "null" when it is absent, blank, or a placeholder for no value
+  // — the same rule keys.ts uses, so a left join's unmatched rows (which
+  // carry no joined columns at all) and a blank cell are treated alike.
+  const isNull = cellValue === null || cellValue === undefined || normalizeKey(cellValue) === null;
+  if (op === "isNull") return isNull;
+  if (op === "isNotNull") return !isNull;
+  // Membership is compared the way join keys are — case and padding do not
+  // make "returned" a different status from "Returned".
+  if (op === "in" || op === "notIn") {
+    const list = (Array.isArray(value) ? value : [value]).map((v) => normalizeKey(v));
+    const hit = !isNull && list.includes(normalizeKey(cellValue));
+    return op === "in" ? hit : !hit;
+  }
   if (cellValue === null || cellValue === undefined) return op === "neq";
 
   if (typeof cellValue === "number" && typeof value !== "boolean") {
@@ -489,8 +502,8 @@ function groupRows(rows: Record<string, unknown>[], groupCols: string[]): Record
 function computeAggregate(rows: Record<string, unknown>[], agg: QueryAggregation): number {
   if (agg.fn === "count") return rows.length;
   // Distinct count works on ANY column type (it's the only aggregate that
-  // means something over strings), and is what "how many employees" wants
-  // when a table has several rows per employee — plain count would report
+  // means something over strings), and is what "how many members" wants
+  // when a table has several rows per member — plain count would report
   // the row count instead.
   if (agg.fn === "countDistinct") {
     const seen = new Set<string>();
@@ -500,7 +513,13 @@ function computeAggregate(rows: Record<string, unknown>[], agg: QueryAggregation
     }
     return seen.size;
   }
-  const nums = rows.map((r) => Number(r[agg.column])).filter((n) => !Number.isNaN(n));
+  // A blank cell is not a zero. Number(null) is 0, so without this guard a
+  // column with 20% gaps averages 20% too low and its minimum reads as 0.
+  const nums = rows
+    .map((r) => r[agg.column])
+    .filter((v) => v !== null && v !== undefined && v !== "")
+    .map((v) => Number(v))
+    .filter((n) => !Number.isNaN(n));
   if (nums.length === 0) return 0;
   switch (agg.fn) {
     case "sum": return round(nums.reduce((a, b) => a + b, 0));

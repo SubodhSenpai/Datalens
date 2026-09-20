@@ -25,6 +25,8 @@ export interface DatasetRecord {
   rows?: Record<string, unknown>[];
   /** Which sheet of the workbook this dataset is, when an XLSX blob holds several. */
   sheetName?: string;
+  /** Data-quality facts found at parse time (e.g. a summary row excluded). */
+  notes?: string[];
 }
 
 export interface RelationshipRecord {
@@ -75,6 +77,8 @@ interface DatasetMetaRecord {
   columnCount: number;
   columns: ColumnSchema[];
   blobUrl: string;
+  sheetName?: string;
+  notes?: string[];
 }
 
 interface SerializedSession {
@@ -118,6 +122,8 @@ function serialize(session: SessionRecord): SerializedSession {
       columnCount: d.columnCount,
       columns: d.columns,
       blobUrl: d.blobUrl,
+      sheetName: d.sheetName,
+      notes: d.notes,
     })),
     relationships: session.relationships,
   };

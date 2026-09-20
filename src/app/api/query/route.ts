@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { QueryRequest, QueryResult, QueryPlan, ChartDataPoint, PipelineStep } from "@/lib/types";
 import { getSession, ensureDatasetRows } from "@/lib/session-store";
-import { planQuery, explainResults, heuristicPlan, PlanParseError, LlmCallTrace } from "@/lib/llm";
+import { planSelection, explainResults, PlanParseError, LlmCallTrace } from "@/lib/llm";
+import { buildSemanticModel } from "@/lib/semantic-model";
+import { compileSelection, Selection } from "@/lib/compile-selection";
+import { mergeAggregatedResults } from "@/lib/merge-results";
 import { planToPandas } from "@/lib/pandas-codegen";
 import { executeQueryPlan, joinRows, JoinKeyMissingError, JoinStats } from "@/lib/query-engine";
 import { evaluateChartChoice } from "@/lib/chart-eval";
@@ -10,6 +13,7 @@ import { detectUnsupportedConcepts, stripMisleadingAliases, detectPlannerHedging
 import { detectColumnAmbiguity } from "@/lib/data-dictionary";
 import { findUnselectedMentioned } from "@/lib/scope";
 import { assessPlan, retryFeedback, PlanAssessment } from "@/lib/answer-check";
+import { linkSchema } from "@/lib/schema-linking";
 
 export const runtime = "nodejs";
 
@@ -73,7 +77,7 @@ export async function POST(req: NextRequest) {
       label: "Question received",
       status: "ok",
       summary: `"${question}" against ${selected.length} dataset${selected.length === 1 ? "" : "s"}`,
-      detail: selected.map((d) => `${d.name} — ${d.rowCount.toLocaleString()} rows, ${d.columns.length} columns`).join("\n"),
+      detail: selected.map((d) => `${d.name} — ${d.rowCount.toLocaleString()} rows, ${d.columns.length} columns${d.notes?.length ? `\n  ↳ ${d.notes.join("\n  ↳ ")}` : ""}`).join("\n"),
       payload: {
         datasets: selected.map((d) => ({ name: d.name, rowCount: d.rowCount, columns: d.columns.map((c) => `${c.name}: ${c.type}`) })),
         detectedRelationships: session.relationships.map((r) => `${r.columnA} ↔ ${r.columnB} (by ${r.basis}, confidence ${r.confidence})`),
@@ -106,11 +110,81 @@ export async function POST(req: NextRequest) {
 
     const plannerDatasets = selected.map((d) => ({ id: d.id, name: d.name, rowCount: d.rowCount, columns: d.columns }));
 
+    // Before asking the model anything: which columns does the question
+    // name, which file holds each, and how do those files join? Computed
+    // from the question, the column names and the detected relationships.
+    // Handed to the planner as facts, and used afterwards to check the plan
+    // actually reaches every column the question referred to.
+    const link = linkSchema(question, plannerDatasets, session.relationships);
+    const nameOf = (id: string) => selected.find((d) => d.id === id)?.name ?? id;
+    trace.push({
+      id: "schema-link",
+      label: "Question linked to columns and files",
+      status: link.unreachable.length > 0 ? "warn" : link.columns.length > 0 ? "ok" : "skipped",
+      summary: link.columns.length > 0
+        ? `${link.columns.length} column${link.columns.length === 1 ? "" : "s"} named → ${link.requiredDatasetIds.length} required dataset${link.requiredDatasetIds.length === 1 ? "" : "s"}${link.joinPath.length ? `, ${link.joinPath.length} join${link.joinPath.length === 1 ? "" : "s"} needed` : ""}`
+        : "No column names recognised in the question — the planner sees the full schema",
+      detail: [
+        ...link.columns.map((c) => `"${c.term}" → ${c.column} in ${c.datasetIds.map(nameOf).join(" | ")}${c.datasetIds.length > 1 ? " (ambiguous)" : ""}`),
+        ...(link.suggestedBaseId ? [`Suggested base: ${nameOf(link.suggestedBaseId)}`] : []),
+        ...link.joinPath.map((j, i) => `Join ${i + 1}: ${nameOf(j.datasetId)} on ${j.leftOn} = ${j.rightOn}${j.cardinality ? ` (${j.cardinality})` : ""}`),
+        ...link.lookupJoins.map((j) => `Optional lookup: ${nameOf(j.datasetId)} on ${j.leftOn} = ${j.rightOn}`),
+        ...link.unreachable.map((id) => `UNREACHABLE: ${nameOf(id)} — no relationship connects it`),
+      ].join("\n") || undefined,
+    });
+
+    // The semantic layer: measures, dimensions and the join graph, inferred
+    // from the column profiles and detected relationships. The planner picks
+    // from this menu and never writes a join — compile-selection.ts derives
+    // the base table and the join chain from what was picked.
+    const semanticModel = buildSemanticModel(plannerDatasets, session.relationships);
+    const aliasOf = (id: string) => semanticModel.tables.find((t) => t.datasetId === id)?.alias ?? id;
+    trace.push({
+      id: "semantic-model",
+      label: "Semantic menu built (measures, dimensions, join graph)",
+      status: "ok",
+      summary: `${semanticModel.measures.length} measures, ${semanticModel.dimensions.length} dimensions across ${semanticModel.tables.length} tables, ${semanticModel.relationships.length} relationships`,
+      detail: semanticModel.tables.map((t) => `${t.alias} = ${t.name} (${t.rowCount.toLocaleString()} rows; keys: ${t.keyColumns.join(", ") || "none"})`).join("\n"),
+    });
+
+    let rawSelection: Selection | undefined;
+    let compileWarnings: string[] = [];
+    let compileExcluded: string[] = [];
+    // Extra sub-plans of a multi-fact selection (measures from several
+    // tables): each is aggregated on its own and merged with the first
+    // plan's result on the dimensions, so no fact table is joined to another.
+    let extraPlans: QueryPlan[] = [];
+    let mergeDimensionCount = 0;
     for (attempts = 1; attempts <= MAX_PLAN_ATTEMPTS; attempts++) {
       planTrace = {};
+      rawSelection = undefined;
+      compileWarnings = [];
+      compileExcluded = [];
+      extraPlans = [];
+      mergeDimensionCount = 0;
       const attemptTag = attempts === 1 ? "" : ` (attempt ${attempts})`;
       try {
-        rawPlan = await planQuery(question, plannerDatasets, session.relationships, preAmbiguity, apiKey, planTrace, feedback);
+        const out = await planSelection(question, plannerDatasets, session.relationships, semanticModel, preAmbiguity, apiKey, planTrace, feedback, link);
+        if (out.kind === "selection") {
+          rawSelection = out.selection;
+          const compiled = compileSelection(out.selection, semanticModel);
+          rawPlan = compiled.plan;
+          compileWarnings = compiled.notes.filter((n) => /^Dropped|No relationship/.test(n));
+          compileExcluded = compiled.excludedDatasetIds;
+          extraPlans = compiled.plans.slice(1);
+          mergeDimensionCount = compiled.mergeDimensionCount;
+          trace.push({
+            id: attempts === 1 ? "compile" : `compile-${attempts}`,
+            label: `Selection compiled to a plan${attemptTag}`,
+            status: compiled.notes.some((n) => /dropped|No relationship/i.test(n)) ? "warn" : "ok",
+            summary: `${(out.selection.measures ?? []).length} measure(s), ${(out.selection.dimensions ?? []).length} dimension(s), ${(out.selection.filters ?? []).length} filter(s) → base + ${(compiled.plan.joins ?? []).length} join(s), decided by the compiler`,
+            detail: compiled.notes.join("\n"),
+            payload: out.selection,
+            payloadLabel: "Selection returned by the model (menu refs — no joins)",
+          });
+        } else {
+          rawPlan = out.plan;
+        }
       } catch (err) {
         if (!(err instanceof PlanParseError)) throw err;
         // The model replied with something that isn't a plan (prose, a
@@ -155,10 +229,10 @@ export async function POST(req: NextRequest) {
               ].join("\n");
           continue;
         }
-        rawPlan = heuristicPlan(question, plannerDatasets, session.relationships);
-        planTrace.usedHeuristicFallback = true;
-        planTrace.fallbackKind = "unparseable";
-        planTrace.fallbackReason = `The model never returned a parseable plan in ${MAX_PLAN_ATTEMPTS} attempts, so the deterministic keyword planner ran instead.`;
+        // The model answered every time but never with a plan. Stop here
+        // rather than answer from keyword matching — a result that does not
+        // come from understanding the question is worse than no result.
+        throw new Error(`The AI model (${err.model}) replied ${MAX_PLAN_ATTEMPTS} times without producing a usable plan, so no answer was generated. Try rephrasing the question, or ask again in a minute.`);
       }
 
       trace.push({
@@ -175,14 +249,14 @@ export async function POST(req: NextRequest) {
 
       trace.push({
         id: attempts === 1 ? "llm" : `llm-${attempts}`,
-        label: `LLM returned a query plan${attemptTag}`,
+        label: `LLM returned a ${rawSelection ? "selection" : "query plan"}${attemptTag}`,
         status: planTrace.usedHeuristicFallback ? "warn" : "ok",
         summary: planTrace.usedHeuristicFallback
           ? "Fell back to the deterministic keyword planner"
-          : `${planTrace.model ?? "model"} returned a structured plan`,
+          : `${planTrace.model ?? "model"} returned a ${rawSelection ? "selection (joins left to the compiler)" : "structured plan"}`,
         detail: planTrace.usedHeuristicFallback ? planTrace.fallbackReason : planTrace.rawResponse,
         payload: rawPlan,
-        payloadLabel: "Parsed plan (before any corrections)",
+        payloadLabel: rawSelection ? "Plan compiled from the selection (before any corrections)" : "Parsed plan (before any corrections)",
         ms: planTrace.ms,
       });
 
@@ -207,7 +281,20 @@ export async function POST(req: NextRequest) {
           : "Checked against the schema: base dataset exists, join keys exist on both sides (following multi-hop chains), every filter/groupBy/aggregation column resolves, aggregates only run on numeric columns, derived expressions reference real columns, unused joins pruned, and the chart points at columns the plan will actually produce.",
       });
 
-      assessment = assessPlan(question, plan, repairs, availableColumnNames);
+      assessment = assessPlan(question, plan, repairs, availableColumnNames, {
+        link,
+        relationships: session.relationships,
+        // Every table any sub-plan reaches counts: a multi-fact selection
+        // covers its second table in a sibling plan, not in this one.
+        planDatasetIds: [
+          plan.datasetId,
+          ...(plan.joins ?? []).map((j) => j.datasetId),
+          ...extraPlans.flatMap((p) => [p.datasetId, ...(p.joins ?? []).map((j) => j.datasetId)]),
+          ...compileExcluded,
+        ],
+        nameOf,
+        ...(rawSelection ? { aliasOf } : {}),
+      });
       if (!firstAttempt) firstAttempt = { plan, repairs, assessment };
 
       trace.push({
@@ -228,17 +315,20 @@ export async function POST(req: NextRequest) {
       // The model has said the data it was shown can't answer this. More
       // attempts with the same data cost calls and change nothing; its own
       // explanation is the right thing to show.
-      if (plannerSaysUnanswerable(rawPlan.reasoning)) {
+      // ...unless the plan simply failed to reach a column the question
+      // names. Then the model is wrong that the data can't answer, the exact
+      // join path is in the feedback, and asking again is the right move.
+      if (plannerSaysUnanswerable(rawSelection?.reasoning ?? rawPlan.reasoning) && !assessment.unreachableColumns) {
         trace.push({
           id: `answer-check-stop-${attempts}`,
           label: "Retry skipped",
           status: "warn",
           summary: "The planner said the selected data cannot answer this question, so no further attempts were made",
-          detail: rawPlan.reasoning,
+          detail: rawSelection?.reasoning ?? rawPlan.reasoning,
         });
         break;
       }
-      feedback = retryFeedback(rawPlan, assessment);
+      feedback = retryFeedback((rawSelection ?? rawPlan) as QueryPlan, assessment);
     }
 
     const planningWarnings: string[] = [];
@@ -373,9 +463,16 @@ export async function POST(req: NextRequest) {
     // Second validation pass, now that real values are available: catch a
     // filter the question asked for that the plan dropped (schema alone
     // can't see this — the filter value lives in the data).
-    const withFilters = injectMissingValueFilters(plan, question, workingRows);
-    Object.assign(plan, withFilters.plan);
-    repairs.push(...withFilters.repairs);
+    // In selection mode the planner chose its filters from a menu that lists
+    // every value of every low-cardinality column; adding filters behind its
+    // back would override that choice. For a legacy plan the check stays,
+    // minus any word that also names a column in scope.
+    if (!rawSelection) {
+      const reserved = link.columns.filter((c) => c.strength === "strong").flatMap((c) => c.term.split(/\s+/));
+      const withFilters = injectMissingValueFilters(plan, question, workingRows, reserved);
+      Object.assign(plan, withFilters.plan);
+      repairs.push(...withFilters.repairs);
+    }
 
     const withDateYears = correctHallucinatedDateFilterYear(plan, workingRows);
     Object.assign(plan, withDateYears.plan);
@@ -493,10 +590,48 @@ export async function POST(req: NextRequest) {
     }
 
     const executeStarted = Date.now();
-    const execution = executeQueryPlan(workingRows, plan);
+    let execution = executeQueryPlan(workingRows, plan);
+
+    // Multi-fact: run every sibling plan the same way (validate → join →
+    // execute) and merge the aggregated results on the dimension values.
+    let pandasExtra = "";
+    if (extraPlans.length > 0) {
+      const parts = [{ columns: execution.columns, rows: execution.rows }];
+      const subSteps: string[] = [];
+      for (const sub of extraPlans) {
+        const v = validateAndRepairPlan(sub, question, schemaDatasets, session.relationships);
+        const subBase = selected.find((d) => d.id === v.plan.datasetId);
+        if (!subBase) continue;
+        let subRows = await ensureDatasetRows(subBase);
+        for (const j of v.plan.joins ?? []) {
+          const jd = byId.get(j.datasetId);
+          const lk = j.leftOn ?? j.on, rk = j.rightOn ?? j.on;
+          if (!jd || !lk || !rk) continue;
+          try { subRows = joinRows(subRows, await ensureDatasetRows(jd), jd.name, lk, rk, j.type ?? "inner"); }
+          catch (err) { if (err instanceof JoinKeyMissingError) continue; throw err; }
+        }
+        const subExec = executeQueryPlan(subRows, v.plan);
+        parts.push({ columns: subExec.columns, rows: subExec.rows });
+        subSteps.push(`${subBase.name}: ${(v.plan.aggregations ?? []).map((a) => `${a.fn}(${a.column})`).join(", ")} over ${subRows.length.toLocaleString()} rows → ${subExec.rows.length} group(s)`);
+        pandasExtra += "\n\n# ── second fact table, aggregated separately ──\n" + planToPandas(v.plan, selected.map((d) => ({ id: d.id, name: d.name }))).replace(/^import pandas as pd\n+/, "").replace(/\bresult\b/g, `result_${subBase.name.replace(/[^a-zA-Z0-9]+/g, "_")}`);
+      }
+      const merged = mergeAggregatedResults(parts, mergeDimensionCount);
+      execution = { ...execution, columns: merged.columns, rows: merged.rows };
+      trace.push({
+        id: "merge",
+        label: "Fact tables aggregated separately and merged",
+        status: "ok",
+        summary: `${parts.length} aggregations merged on ${mergeDimensionCount} dimension${mergeDimensionCount === 1 ? "" : "s"} → ${merged.rows.length} row${merged.rows.length === 1 ? "" : "s"}`,
+        detail: [
+          "Totals from different tables are never joined row-by-row (that multiplies one side and drops the other's unmatched rows). Each table is aggregated on its own at the requested grouping, then the results are placed side by side.",
+          ...subSteps,
+        ].join("\n"),
+      });
+      if (mergeDimensionCount > 0) pandasExtra += `\n\nresult = result.merge(${parts.length > 1 ? "result_2" : "result"}, how="outer", on=[${merged.columns.slice(0, mergeDimensionCount).map((c) => JSON.stringify(c)).join(", ")}])  # align the separately-aggregated tables on their dimensions`;
+    }
     const executeMs = Date.now() - executeStarted;
 
-    const pandasCode = planToPandas(plan, selected.map((d) => ({ id: d.id, name: d.name })));
+    const pandasCode = planToPandas(plan, selected.map((d) => ({ id: d.id, name: d.name }))) + pandasExtra;
 
     trace.push({
       id: "execute",
@@ -630,7 +765,9 @@ export async function POST(req: NextRequest) {
         // Stated by us, not left to the model: if the data can't answer the
         // question, that must appear even if the model ignores the prompt.
         ...scopeWarnings.map((w) => `Important: ${w}`),
+        ...selected.flatMap((d) => (d.notes ?? []).map((n) => `Note (${d.name}): ${n}`)),
         ...planningWarnings.map((w) => `Important: ${w}`),
+        ...compileWarnings.map((w) => `Important: ${w}`),
         ...conceptWarnings.map((w) => `Important: ${w.message}.`),
         ...(hedgeWarning ? [`Important: ${hedgeWarning}`] : []),
         ...ambiguityNotes.map((n) => `Note: ${n}`),

@@ -1,5 +1,7 @@
 import { QueryPlan } from "./types";
 import { PlanRepair } from "./plan-validator";
+import { SchemaLink, findJoinPath, unreachableLinkedColumns } from "./schema-linking";
+import { RelationshipRecord } from "./session-store";
 
 /**
  * Decides, without a model, whether a validated plan can answer the question
@@ -23,22 +25,31 @@ export interface PlanAssessment {
   problems: string[];
   /** Concrete corrections, so the retry can go straight to a fixed plan. */
   hints: string[];
+  /**
+   * The question named a column that exists in a file the plan never
+   * reached. Set so the caller keeps retrying even if the model claimed the
+   * data cannot answer — the data can; the plan just didn't reach it.
+   */
+  unreachableColumns?: number;
 }
 
 // Wording that asks for ONE summarised figure. Ranking words ("highest",
-// "most", "top") are left out on purpose: "the 3 highest paid employees"
+// "most", "top") are left out on purpose: "the 10 longest books"
 // is correctly a row ranking with no aggregation.
 const WANTS_AGGREGATE = /\b(total|sum of|how many|number of|count of|average|avg|mean|overall)\b/i;
 
-// A formula given in the question itself: "revenue = qty × price × (1 − d%)".
+// A formula given in the question itself: "billed = units × rate × (1 + tax%)".
 const SPELLS_OUT_FORMULA = /\b([a-z_ ]{3,30})\s*=\s*[a-z_ ]+\s*[×x*\/+\-]/i;
 
 const MATERIAL_DROP = /^Dropped (derived column|sum|avg|min|max|countDistinct|count|join to|groupBy|filter on unknown)/i;
 
-// A question asking for a "value"/"amount"/"total"/"worth" — an outcome, not
-// a rate. "Average unit price" is deliberately excluded: naming the rate
-// directly IS asking for the rate.
-const WANTS_VALUE = /\b(value|worth|amount)\b/i;
+// A question asking for a "value"/"amount"/"worth"/"revenue"/"turnover" — an
+// outcome, not a rate. "Average unit price" is deliberately excluded: naming
+// the rate directly IS asking for the rate. "sales" is deliberately excluded
+// too — "average sales" is genuinely ambiguous between a money total and a
+// count of transactions, so guessing which one is meant would be exactly
+// the kind of override this file exists to avoid.
+const WANTS_VALUE = /\b(value|worth|amount|revenue|turnover)\b/i;
 
 // A column name that is itself a PER-UNIT rate, not a total — the standard
 // "price"/"rate"/"cost" naming family, qualified as per-unit. Matches
@@ -49,11 +60,25 @@ const LOOKS_LIKE_UNIT_RATE = /\bunit[_ ]?(price|cost|rate)\b|\b(price|cost|rate)
 // A column name that looks like a quantity/count to multiply the rate by.
 const LOOKS_LIKE_QUANTITY = /\b(qty|quantity|units?|count)\b/i;
 
+export interface LinkContext {
+  link: SchemaLink;
+  relationships: RelationshipRecord[];
+  /** Dataset ids the validated plan actually reaches: base plus every kept join. */
+  planDatasetIds: string[];
+  nameOf: (id: string) => string;
+  /**
+   * In selection mode the planner names menu fields and never writes joins,
+   * so hints must say "use field alias.column", not "add a join".
+   */
+  aliasOf?: (id: string) => string;
+}
+
 export function assessPlan(
   question: string,
   plan: QueryPlan,
   repairs: PlanRepair[],
-  availableColumns: string[]
+  availableColumns: string[],
+  linkContext?: LinkContext
 ): PlanAssessment {
   const problems: string[] = [];
   const hints: string[] = [];
@@ -62,7 +87,7 @@ export function assessPlan(
   // 1. A question for a figure, answered with rows.
   if (WANTS_AGGREGATE.test(question) && !hasAggregation && !plan.correlate) {
     problems.push("The question asks for a summarised figure (a total / count / average), but the plan has no \"aggregations\" entry, so it would return raw rows instead of that figure.");
-    hints.push("Add an \"aggregations\" entry for each figure asked for (sum for a total, count or countDistinct for how many, avg for an average). Only add \"groupBy\" if the question asks for a breakdown \"by\" something.");
+    hints.push("Add a measure (an \"aggregations\" entry, or \"measures\" in selection form) for each figure asked for (sum for a total, count or countDistinct for how many, avg for an average). Only group (\"groupBy\"/\"dimensions\") if the question asks for a breakdown \"by\" something.");
   }
 
   // 2. A formula the question spells out that the plan never computed.
@@ -97,12 +122,48 @@ export function assessPlan(
         `The question asks for a "value"/"amount", but the plan directly ${rateAgg.fn}s "${rateAgg.column}", which is a per-unit rate, not a value — and "${quantityColumn}" exists to multiply it by.`
       );
       hints.push(
-        `A "value" is usually rate × quantity. Add a "derive" entry (e.g. "order_value") whose "expr" multiplies "${rateAgg.column}" by "${quantityColumn}" (and by any discount/tax column the same way, if one exists), then aggregate the derived column instead of "${rateAgg.column}" directly.`
+        `A "value" is usually rate × quantity. Add a "derive" entry (e.g. "computed_value") whose "expr" multiplies "${rateAgg.column}" by "${quantityColumn}" (and by any discount/tax column the same way, if one exists), then aggregate the derived column instead of "${rateAgg.column}" directly.`
       );
     }
   }
 
-  return { ok: problems.length === 0, problems, hints };
+  // 5. The question names a column that the plan cannot reach. "Loans by
+  // member city" answered from the loans file alone, grouped by its own
+  // "branch": valid, and a different question. Whether "city" is
+  // reachable from the plan's datasets is a fact about the schema, not a
+  // guess about intent, so it can be checked — and the exact join path can
+  // be handed back.
+  let unreachableColumns = 0;
+  if (linkContext) {
+    const missing = unreachableLinkedColumns(linkContext.link, linkContext.planDatasetIds);
+    unreachableColumns = missing.length;
+    for (const m of missing) {
+      const holders = m.datasetIds.map(linkContext.nameOf);
+      problems.push(`The question refers to "${m.term}" (column "${m.column}"), which exists only in ${holders.map((h) => `"${h}"`).join(" / ")} — a dataset the plan never uses or joins.`);
+      if (linkContext.aliasOf) {
+        // Selection mode: the fix is naming the right menu field; the
+        // compiler does the join.
+        const refs = m.datasetIds.map((id) => `${linkContext.aliasOf!(id)}.${m.column}`);
+        hints.push(`Use the menu field ${refs.map((r) => `"${r}"`).join(" or ")} as a dimension, filter or select (the join is made automatically) instead of a similar-sounding column from another table.`);
+        continue;
+      }
+      const base = linkContext.planDatasetIds[0];
+      // Several files may hold the concept; point at the one nearest the base.
+      const candidates = linkContext.link.conceptHolders.get(m.column.toLowerCase()) ?? m.datasetIds;
+      let path: ReturnType<typeof findJoinPath>;
+      for (const holder of candidates) {
+        const p = base ? findJoinPath(base, holder, linkContext.relationships) : undefined;
+        if (p && (!path || p.length < path.length)) path = p;
+      }
+      hints.push(
+        path && path.length > 0
+          ? `Keep "${linkContext.nameOf(base)}" as the base and add these joins in order: ${path.map((j, i) => `${i + 1}) "${linkContext.nameOf(j.datasetId)}" leftOn "${j.leftOn}" rightOn "${j.rightOn}"`).join("; ")} — then use "${m.column}" in groupBy/filters/select as the question asks.`
+          : `Include "${holders[0]}" in the plan (as the base, or joined through a listed relationship) so that "${m.column}" is available.`
+      );
+    }
+  }
+
+  return { ok: problems.length === 0, problems, hints, ...(unreachableColumns ? { unreachableColumns } : {}) };
 }
 
 /** The extra block appended to the planner prompt on a retry. */
@@ -110,7 +171,7 @@ export function retryFeedback(previous: QueryPlan, assessment: PlanAssessment): 
   return [
     "",
     "─────────────",
-    "Your previous plan did not answer the question. It was:",
+    "Your previous answer did not answer the question. It was:",
     JSON.stringify(previous),
     "",
     "What was wrong with it:",
@@ -119,6 +180,6 @@ export function retryFeedback(previous: QueryPlan, assessment: PlanAssessment): 
     "How to fix it:",
     ...assessment.hints.map((h) => `- ${h}`),
     "",
-    "Output the corrected plan now, as JSON only. Do not explain, do not list options, and do not fall back to a narrower question — answer this one directly.",
+    "Output the corrected JSON now, in the same shape as before, JSON only. Do not explain, do not list options, and do not fall back to a narrower question — answer this one directly.",
   ].join("\n");
 }

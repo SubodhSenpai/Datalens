@@ -70,10 +70,17 @@ export function planToPandas(plan: QueryPlan, datasets: PandasDatasetName[]): st
   }
 
   for (const f of plan.filters ?? []) {
-    if (f.op === "contains") {
+    if (f.op === "in" || f.op === "notIn") {
+      const list = (Array.isArray(f.value) ? f.value : [f.value]).map((v) => (typeof v === "number" ? String(v) : quote(String(v)))).join(", ");
+      lines.push(`${base} = ${base}[${f.op === "notIn" ? "~" : ""}${base}[${quote(f.column)}].isin([${list}])]`);
+    } else if (f.op === "isNull") {
+      lines.push(`${base} = ${base}[${base}[${quote(f.column)}].isna()]`);
+    } else if (f.op === "isNotNull") {
+      lines.push(`${base} = ${base}[${base}[${quote(f.column)}].notna()]`);
+    } else if (f.op === "contains") {
       lines.push(`${base} = ${base}[${base}[${quote(f.column)}].astype(str).str.contains(${quote(String(f.value))}, case=False, na=False)]`);
     } else {
-      lines.push(`${base} = ${base}[${base}[${quote(f.column)}] ${OP_TO_PANDAS[f.op] ?? "=="} ${quote(f.value)}]`);
+      lines.push(`${base} = ${base}[${base}[${quote(f.column)}] ${OP_TO_PANDAS[f.op] ?? "=="} ${quote(Array.isArray(f.value) ? f.value.join(",") : f.value)}]`);
     }
   }
 
@@ -108,10 +115,17 @@ export function planToPandas(plan: QueryPlan, datasets: PandasDatasetName[]): st
       lines.push("", "result = pd.DataFrame({", ...items, "})");
     }
     for (const h of plan.having ?? []) {
-      if (h.op === "contains") {
+      if (h.op === "in" || h.op === "notIn") {
+        const list = (Array.isArray(h.value) ? h.value : [h.value]).map((v) => (typeof v === "number" ? String(v) : quote(String(v)))).join(", ");
+        lines.push(`result = result[${h.op === "notIn" ? "~" : ""}result[${quote(h.column)}].isin([${list}])]`);
+      } else if (h.op === "isNull") {
+        lines.push(`result = result[result[${quote(h.column)}].isna()]`);
+      } else if (h.op === "isNotNull") {
+        lines.push(`result = result[result[${quote(h.column)}].notna()]`);
+      } else if (h.op === "contains") {
         lines.push(`result = result[result[${quote(h.column)}].astype(str).str.contains(${quote(String(h.value))}, case=False, na=False)]`);
       } else {
-        lines.push(`result = result[result[${quote(h.column)}] ${OP_TO_PANDAS[h.op] ?? "=="} ${quote(h.value)}]`);
+        lines.push(`result = result[result[${quote(h.column)}] ${OP_TO_PANDAS[h.op] ?? "=="} ${quote(Array.isArray(h.value) ? h.value.join(",") : h.value)}]`);
       }
     }
     result = "result";

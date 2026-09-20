@@ -19,7 +19,7 @@ const NUMERIC = /^[+-]?(\d+\.?\d*|\.\d+)$/;
  * Canonical form of a cell used as a join key, or `null` for values that must
  * never match anything (blank, or a placeholder standing in for "no value").
  *
- * Numeric strings collapse to their numeric form, so a `store_id` read as the
+ * Numeric strings collapse to their numeric form, so a `site_id` read as the
  * number 1 from one file matches `"001"` read as text from another — the
  * common CSV/XLSX type split that previously made two files unjoinable.
  */

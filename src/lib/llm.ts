@@ -3,6 +3,9 @@ import { AggregateFn, ColumnSchema, FilterOp, QueryPlan } from "./types";
 import { RelationshipRecord } from "./session-store";
 import { joinPrefix } from "./query-engine";
 import { AmbiguityWarning } from "./data-dictionary";
+import { SchemaLink } from "./schema-linking";
+import { SemanticModel, renderSemanticMenu } from "./semantic-model";
+import { Selection, looksLikeSelection } from "./compile-selection";
 
 export interface DatasetSchemaContext {
   id: string;
@@ -46,6 +49,18 @@ export class PlanParseError extends Error {
     public readonly truncated: boolean
   ) {
     super("The model's response contained no JSON plan with a datasetId.");
+  }
+}
+
+/**
+ * No model could be reached at all (no API key, or every model/key in the
+ * chain was capped, congested or delisted). Thrown so the pipeline stops
+ * with an honest error — no answer is fabricated by a keyword fallback
+ * when the question was never actually understood.
+ */
+export class PlannerUnavailableError extends Error {
+  constructor(reason: string) {
+    super(`The AI planner is unavailable, so no answer was generated: ${reason}`);
     this.name = "PlanParseError";
   }
 }
@@ -58,10 +73,18 @@ export class PlanParseError extends Error {
 // fallback (accurate but far weaker), each free-tier candidate below is
 // tried in order before giving up.
 const MODEL = process.env.OPENROUTER_MODEL ?? "qwen/qwen-2.5-7b-instruct";
+// Free-tier only (no paid model is ever called). Note that OpenRouter's
+// per-day free quota is per ACCOUNT, shared by every ":free" model, so a
+// longer chain helps with a congested or delisted model, not with a spent
+// daily cap — more API keys do.
 const FALLBACK_MODELS = [
   "google/gemma-4-31b-it:free",
-  "deepseek/deepseek-v4-flash-0731:free",
   "z-ai/glm-5.2:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",
+  "google/gemma-4-26b-a4b-it:free",
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "nex-agi/nex-n2.5-pro:free",
+  "thinkingmachines/inkling:free",
 ].filter((m) => m !== MODEL);
 const MODEL_CHAIN = [MODEL, ...FALLBACK_MODELS];
 
@@ -94,13 +117,34 @@ function getClients(userApiKey?: string): OpenAI[] {
 // plus extractJson()'s regex fallback below, rather than a mode that could
 // be silently unsupported per model/provider.
 const PLANNER_MAX_TOKENS = 2000;
-const RATE_LIMIT_RETRIES = 2;
+const RATE_LIMIT_RETRIES = 1;
 const RATE_LIMIT_BACKOFF_MS = 1500;
 
 function isRateLimited(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return /429|rate.?limit/i.test(msg);
 }
+
+// A per-DAY cap is not congestion: it will not clear in the seconds a retry
+// waits, and it will not clear for the rest of this process either. Such a
+// (model, key) pair is skipped outright instead of costing a backoff ladder
+// on every single call — which is what turned a 5-second plan into a
+// 70-second one.
+function isDailyCap(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /per.?day|daily|requests per day/i.test(msg);
+}
+const EXHAUSTED_TTL_MS = 60 * 60 * 1000;
+// Ordinary 429s (a congested free provider) clear in a minute or so; a pair
+// that just failed that way is skipped for the next requests instead of
+// being re-tried with backoff by every question in the meantime.
+const CONGESTED_TTL_MS = 90 * 1000;
+// Wall-clock budget for one planner call across the whole model/key chain.
+// Without it, 4 keys × 4 models × backoff retries turned a single question
+// into a five-minute wait that the client gave up on.
+const CHAIN_BUDGET_MS = 60 * 1000;
+const exhaustedUntil = new Map<string, number>();
+const exhaustedKey = (model: string, client: OpenAI) => `${model}|${client.apiKey.slice(-8)}`;
 
 // Ordering matters here: exhaust every API key on the PRIMARY model first
 // (each key has its own rate-limit bucket, so a second key is a real way
@@ -113,23 +157,38 @@ async function completeJson(
   maxTokens: number
 ): Promise<{ text: string; model: string; finishReason?: string }> {
   let lastErr: unknown;
+  const deadline = Date.now() + CHAIN_BUDGET_MS;
   for (const model of MODEL_CHAIN) {
     for (const client of clients) {
+      if (Date.now() > deadline) throw lastErr ?? new Error("Planner time budget exhausted before any model answered.");
+      const k = exhaustedKey(model, client);
+      const until = exhaustedUntil.get(k);
+      if (until && until > Date.now()) continue;
       try {
         const { text, finishReason } = await completeJsonWithModel(client, model, system, userMessage, maxTokens);
         return { text, model, finishReason };
       } catch (err) {
         lastErr = err;
+        if (isDailyCap(err) || isModelUnavailable(err)) exhaustedUntil.set(k, Date.now() + EXHAUSTED_TTL_MS);
+        else if (isRateLimited(err) || isCapacityError(err)) exhaustedUntil.set(k, Date.now() + CONGESTED_TTL_MS);
         // Only move on to the next key/model for capacity-related failures
         // (rate limit, out of credits/capacity) — anything else (bad
         // request, auth) will fail identically everywhere, so there's no
         // point burning the whole chain on it.
-        if (!isRateLimited(err) && !isCapacityError(err)) throw err;
+        if (!isRateLimited(err) && !isCapacityError(err) && !isModelUnavailable(err)) throw err;
         console.error(`completeJson: "${model}" unavailable (${err instanceof Error ? err.message : err}), trying next option.`);
       }
     }
   }
   throw lastErr;
+}
+
+// A model id that OpenRouter no longer serves (404 "This model is
+// unavailable for free" / "No endpoints found") is specific to that model,
+// not to the request, so the chain moves on rather than giving up.
+function isModelUnavailable(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /404|unavailable|no endpoints|not found/i.test(msg);
 }
 
 function isCapacityError(err: unknown): boolean {
@@ -185,7 +244,7 @@ async function completeJsonWithModel(client: OpenAI, model: string, system: stri
       // A free-tier shared pool returning 429 is transient congestion, not
       // a real failure — worth a couple of short retries before giving up
       // to the much weaker heuristic fallback.
-      if (!isRateLimited(err) || attempt === RATE_LIMIT_RETRIES) throw err;
+      if (!isRateLimited(err) || isDailyCap(err) || attempt === RATE_LIMIT_RETRIES) throw err;
     }
   }
   throw lastErr;
@@ -193,26 +252,19 @@ async function completeJsonWithModel(client: OpenAI, model: string, system: stri
 
 // ─── Query Planner (Figure 4) ──────────────────────────────────────────────
 
-export async function planQuery(
+/**
+ * Builds the user message for the planner: the (pruned) schema, the
+ * relationships, the schema link, any ambiguity notes and the question.
+ * Pure, so the exact prompt for any question can be inspected offline.
+ */
+export function buildPlannerUserMessage(
   question: string,
   datasets: DatasetSchemaContext[],
   relationships: RelationshipRecord[],
   ambiguities: AmbiguityWarning[] = [],
-  userApiKey?: string,
-  trace?: LlmCallTrace,
-  /** On a retry: what the last plan got wrong and how to fix it (see answer-check.ts). */
+  link?: SchemaLink,
   feedback?: string
-): Promise<QueryPlan> {
-  const clients = getClients(userApiKey);
-  if (clients.length === 0) {
-    if (trace) {
-      trace.usedHeuristicFallback = true;
-      trace.fallbackKind = "no-key";
-      trace.fallbackReason = "No API key configured (neither a server key nor one set in the browser), so the deterministic keyword planner ran instead of an LLM.";
-    }
-    return heuristicPlan(question, datasets, relationships);
-  }
-
+): string {
   // Datasets are identified to the model BY NAME, not by their internal
   // random id. Copying "ds_3sgmoki33is" correctly out of a dozen lookalike
   // random strings is a real failure mode — observed the model name the
@@ -222,7 +274,22 @@ export async function planQuery(
   // Names and types alone cannot separate an "amount" in one file from an
   // "amount" in another. A couple of real values and a key marker usually
   // can, and they are the cheapest disambiguating evidence available.
-  const schemaContext = datasets.map((d) => ({
+  // Schema pruning. A small model's accuracy drops as irrelevant tables are
+  // added to its prompt; with six tables and thirteen relationships it kept
+  // grouping by a similar-sounding column in the wrong file instead of
+  // joining. When linking has identified the datasets the question needs,
+  // those are shown in full and the rest are reduced to a one-line
+  // "also available" entry — still reachable, no longer competing.
+  const focusIds = new Set<string>();
+  if (link && link.requiredDatasetIds.length > 0) {
+    for (const id of link.requiredDatasetIds) focusIds.add(id);
+    for (const j of link.joinPath) focusIds.add(j.datasetId);
+    for (const j of link.lookupJoins) focusIds.add(j.datasetId);
+    for (const c of link.columns) for (const id of c.datasetIds) focusIds.add(id);
+  }
+  const inFocus = (id: string) => focusIds.size === 0 || focusIds.has(id);
+
+  const schemaContext = datasets.filter((d) => inFocus(d.id)).map((d) => ({
     dataset: d.name,
     rowCount: d.rowCount,
     prefixWhenJoined: joinPrefix(d.name),
@@ -233,7 +300,8 @@ export async function planQuery(
       ...(c.sample?.length ? { examples: c.sample.slice(0, 3) } : {}),
     })),
   }));
-  const relationshipContext = relationships.map((r) => ({
+  const otherDatasets = datasets.filter((d) => !inFocus(d.id)).map((d) => `${d.name} (${d.columns.map((c) => c.name).join(", ")})`);
+  const relationshipContext = relationships.filter((r) => inFocus(r.datasetIdA) && inFocus(r.datasetIdB)).map((r) => ({
     datasetA: datasets.find((d) => d.id === r.datasetIdA)?.name ?? r.datasetIdA,
     columnA: r.columnA,
     datasetB: datasets.find((d) => d.id === r.datasetIdB)?.name ?? r.datasetIdB,
@@ -243,11 +311,71 @@ export async function planQuery(
     ...(r.cardinality ? { cardinality: r.cardinality } : {}),
   }));
 
+  const ambiguityLine = ambiguities.length
+    ? `\n\nHeads up — this question's wording could mean more than one column:\n${ambiguities
+        .map((a) => `- "${a.concept}": ${a.candidates.map((c) => `"${c.column}" (${c.datasetName})`).join(" or ")}`)
+        .join("\n")}\nPick the one that most literally matches the question, and say which one you picked (and that alternatives exist) in "reasoning".`
+    : "";
+  // The schema link, stated as facts the model can copy rather than a
+  // search it has to run: which file each named column lives in, which
+  // datasets are therefore mandatory, and the exact join keys in order.
+  const nameOf = (id: string) => datasets.find((d) => d.id === id)?.name ?? id;
+  const linkBlock = link && (link.columns.length > 0 || link.requiredDatasetIds.length > 0)
+    ? [
+        "",
+        "",
+        "Schema link — worked out from the question and the data, so use it rather than guessing:",
+        ...link.columns.map((c) =>
+          c.datasetIds.length === 1
+            ? `- "${c.term}" → column "${c.column}", which exists ONLY in "${nameOf(c.datasetIds[0])}"`
+            : `- "${c.term}" → column "${c.column}", present in ${c.datasetIds.map((id) => `"${nameOf(id)}"`).join(" and ")} (say which in "reasoning")`
+        ),
+        ...(link.requiredDatasetIds.length > 0
+          ? [`Datasets the plan MUST include: ${link.requiredDatasetIds.map((id) => `"${nameOf(id)}"`).join(", ")}.`]
+          : []),
+        ...(link.suggestedBaseId
+          ? [`Suggested base ("datasetId"): "${nameOf(link.suggestedBaseId)}" — it holds the rows being counted or summed.`]
+          : []),
+        ...(link.joinPath.length > 0
+          ? ["Join path from that base, in order:", ...link.joinPath.map((j, i) => `  ${i + 1}. join "${nameOf(j.datasetId)}" with leftOn "${j.leftOn}", rightOn "${j.rightOn}"${j.cardinality ? ` (${j.cardinality})` : ""}`)]
+          : []),
+        ...(link.lookupJoins.length > 0
+          ? ["To show names instead of ids, you may also join:", ...link.lookupJoins.map((j) => `  - "${nameOf(j.datasetId)}" with leftOn "${j.leftOn}", rightOn "${j.rightOn}"`)]
+          : []),
+        ...(link.unreachable.length > 0
+          ? [`No relationship connects ${link.unreachable.map((id) => `"${nameOf(id)}"`).join(", ")} to the base — say so in "reasoning" rather than inventing a join key.`]
+          : []),
+      ].join("\n")
+    : "";
+  const othersBlock = otherDatasets.length > 0
+    ? `\n\nAlso available (not shown in full because the question doesn't appear to need them; name one exactly if it does): ${otherDatasets.join("; ")}`
+    : "";
+  const userMessage = `Datasets:\n${JSON.stringify(schemaContext, null, 2)}${othersBlock}\n\nRelationships:\n${JSON.stringify(relationshipContext, null, 2)}${linkBlock}${ambiguityLine}\n\nQuestion: ${question}${feedback ?? ""}`;
+  return userMessage;
+}
+
+export async function planQuery(
+  question: string,
+  datasets: DatasetSchemaContext[],
+  relationships: RelationshipRecord[],
+  ambiguities: AmbiguityWarning[] = [],
+  userApiKey?: string,
+  trace?: LlmCallTrace,
+  /** On a retry: what the last plan got wrong and how to fix it (see answer-check.ts). */
+  feedback?: string,
+  /** Which columns/datasets the question names and how they join (see schema-linking.ts). */
+  link?: SchemaLink
+): Promise<QueryPlan> {
+  const clients = getClients(userApiKey);
+  if (clients.length === 0) {
+    throw new PlannerUnavailableError("no API key is configured (neither a server key nor one set in the browser).");
+  }
+
   const system = `You are a query planner for a tabular data analysis tool. Given a user's natural-language question and the schema of one or more datasets (plus detected column relationships between them), output ONLY a JSON object (no markdown, no prose) matching this TypeScript type:
 
 type QueryPlan = {
   datasetId: string;            // the NAME of the base dataset, copied EXACTLY as it appears in the "dataset" field of the list below, including any sheet suffix (e.g. "finance.xlsx — Q1"). Never invent a name, and never use a name that isn't in the list. The base dataset MUST be the one that actually contains the main number the question asks for — if the question asks for a total of some column, the base is the dataset holding that column, not a different dataset that merely relates to it.
-  joins?: { datasetId: string; on?: string; leftOn?: string; rightOn?: string; type?: "inner"|"left" }[]; // datasetId here is also the joined dataset's NAME, copied exactly. Use when the question needs data from more than one dataset. Use "on" ONLY when both datasets name the join column identically. If a relationship below has different columnA/columnB names (e.g. matched by value overlap, not name), you MUST use leftOn (the base dataset's column name) + rightOn (the joined dataset's column name) instead — do not invent a column name that doesn't exist in one of the datasets, that silently produces garbage results. A question can need data from a THIRD dataset that has no direct relationship to the base — e.g. base is a shipments table with only a warehouse id, and the question wants a "zone name" that lives in a zones table connected only through a warehouses table. In that case list BOTH joins: one from the base to the intermediate dataset, then one from the intermediate dataset's key to the third dataset (leftOn/rightOn can reference a column that only exists after the FIRST join has been applied).
+  joins?: { datasetId: string; on?: string; leftOn?: string; rightOn?: string; type?: "inner"|"left" }[]; // datasetId here is also the joined dataset's NAME, copied exactly. Use when the question needs data from more than one dataset. Use "on" ONLY when both datasets name the join column identically. If a relationship below has different columnA/columnB names (e.g. matched by value overlap, not name), you MUST use leftOn (the base dataset's column name) + rightOn (the joined dataset's column name) instead — do not invent a column name that doesn't exist in one of the datasets, that silently produces garbage results. A question can need data from a THIRD dataset that has no direct relationship to the base — e.g. base is a readings table with only a sensor id, and the question wants a "site name" that lives in a sites table connected only through a sensors table. In that case list BOTH joins: one from the base to the intermediate dataset, then one from the intermediate dataset's key to the third dataset (leftOn/rightOn can reference a column that only exists after the FIRST join has been applied).
   derive?: { as: string; expr: string }[]; // computed row-level columns, evaluated before filters/groupBy/aggregations. expr is ARITHMETIC ONLY over existing numeric column names: + - * / ( ) and number literals — no functions, no strings. Use this whenever the question needs a value that isn't already a literal column but is a straightforward formula over ones that exist — a total built from a count column times a per-unit column, a net figure built from a gross column minus a deduction column, and so on. Never invent a number outside this expression grammar.
   select?: string[];            // columns to include in the output, omit for all
   filters?: { column: string; op: "eq"|"neq"|"gt"|"gte"|"lt"|"lte"|"contains"; value: string|number|boolean }[];
@@ -264,7 +392,7 @@ type QueryPlan = {
   reasoning?: string;           // one sentence on why this plan answers the question
 };
 
-A question comparing multiple values of the SAME column ("active vs exited", "B2B vs B2C", "compare X and Y") wants a groupBy on that column, NOT a filter — a plan can only have one value per "eq" filter on a column, so filtering "status = active" AND "status = exited" at once matches zero rows. GroupBy shows every value (including ones not named) in one result; only add a filter when the question wants to see ONE value/subset, not when it's comparing several.
+A question comparing multiple values of the SAME column ("open vs closed", "domestic vs export", "compare X and Y") wants a groupBy on that column, NOT a filter — a plan can only have one value per "eq" filter on a column, so filtering "status = open" AND "status = closed" at once matches zero rows. GroupBy shows every value (including ones not named) in one result; only add a filter when the question wants to see ONE value/subset, not when it's comparing several.
 
 Only reference columns that exist in the given schema. After a join, a joined-in column keeps its original name unless a column of that name already exists, in which case it is renamed to that dataset's "prefixWhenJoined" value + "_" + the column name (the prefix is given per dataset above — use it exactly; it is NOT the file name). So if two files each have "amount" and the second is joined in, the base's stays "amount" and the joined one becomes e.g. "refunds_amount". Pick sensible defaults: totals/averages/counts always need an "aggregations" entry (never leave a "total"/"average" question as an unaggregated row dump); "by <dimension>" or "each <dimension>" implies groupBy; "top/bottom N" implies sort+limit; chartType "none" only for a single scalar answer. Chart choice: bar for comparing a handful of categories, dot instead of bar when there are more than ~12 categories, line for trends over time, area for cumulative/running totals over time, pie for a proportion breakdown of 5 or fewer categories, treemap for a proportion breakdown of 6+ categories, histogram for the distribution of one numeric column, scatter for the relationship between two numeric columns (pair with "correlate"), radar for comparing several metrics across a few entities, heatmap for a value across two categorical dimensions at once.
 
@@ -279,14 +407,14 @@ When the question names a quantity that is NOT a literal column but is a plain f
 {"datasetId":"usage.csv","derive":[{"as":"billed","expr":"units_used * rate_per_unit * (1 + tax_pct / 100)"}],"aggregations":[{"column":"billed","fn":"sum","as":"total_billed"}]}
 The same applies to any such quantity — work out which existing numeric columns combine into it, and write that arithmetic in "derive".
 
-A question about entities that meet a condition ACROSS several of their rows — "in both periods", "in every region", "in all four quarters" — is a groupBy + aggregation + "having", never a plain row filter. A row-level filter can only ask "does this ONE row meet the threshold"; counting those rows answers a completely different question (it counts rows, not entities, and includes entities that qualified in only one period). The shape is: filter the rows to the ones meeting the threshold, group by the entity, countDistinct the period column to see how many periods each entity survived in, then require that count to be the number of periods the question demands. Example: a table of store_id, quarter, sales, asked "how many stores exceeded 10000 in all four quarters":
-{"datasetId":"quarterly_sales.csv","filters":[{"column":"sales","op":"gt","value":10000}],"groupBy":["store_id"],"aggregations":[{"column":"quarter","fn":"countDistinct","as":"qualifying_quarters"}],"having":[{"column":"qualifying_quarters","op":"gte","value":4}],"chartType":"none"}
-"both"/"all" means the having threshold is the number of distinct periods in the data (2 for two periods, 4 for four quarters). The result is one row per qualifying entity, and the row count IS the answer to "how many".
+A question about entities that meet a condition ACROSS several of their rows — "in both terms", "in every semester", "in all three seasons" — is a groupBy + aggregation + "having", never a plain row filter. A row-level filter can only ask "does this ONE row meet the threshold"; counting those rows answers a completely different question (it counts rows, not entities, and includes entities that qualified in only one period). The shape is: filter the rows to the ones meeting the threshold, group by the entity, countDistinct the period column to see how many periods each entity survived in, then require that count to be the number of periods the question demands. Example: a table of branch_code, semester, enrolments, asked "how many branches exceeded 200 in all three semesters":
+{"datasetId":"semester_enrolments.csv","filters":[{"column":"enrolments","op":"gt","value":200}],"groupBy":["branch_code"],"aggregations":[{"column":"semester","fn":"countDistinct","as":"qualifying_semesters"}],"having":[{"column":"qualifying_semesters","op":"gte","value":3}],"chartType":"none"}
+"both"/"all" means the having threshold is the number of distinct periods in the data (2 for two terms, 3 for three semesters). The result is one row per qualifying entity, and the row count IS the answer to "how many".
 
 For a cross-dataset question, check the Relationships list below first — each entry gives columnA (in datasetIdA) and columnB (in datasetIdB) plus how it was detected ("name" = identical column names; "value-overlap" = the column names differ but their actual values substantially overlap, e.g. a "country" column and a "nation" column both containing the same country names). Only join on a relationship that's actually listed; if no relationship connects the datasets you need, say so in "reasoning" and answer from the single dataset you can, rather than guessing a join key.
 
-Three-dataset example — this pattern applies whenever the value you need to group by lives TWO joins away from the base dataset, regardless of what the datasets are actually called: base "shipments" (columns shipment_id, weight_kg, warehouse_id) needs to be broken down by "zone name", which only exists in "zones" (zone_id, zone_name) — and shipments has no zone_id at all, only "warehouses" (warehouse_id, zone_id) connects the two:
-{"datasetId":"shipments.csv","joins":[{"datasetId":"warehouses.csv","on":"warehouse_id"},{"datasetId":"zones.csv","on":"zone_id"}],"groupBy":["zone_name"],"aggregations":[{"column":"weight_kg","fn":"sum","as":"total_weight"}],"chartType":"bar","chartX":"zone_name","chartY":["total_weight"]}
+Three-dataset example — this pattern applies whenever the value you need to group by lives TWO joins away from the base dataset, regardless of what the datasets are actually called: base "readings" (columns reading_id, temperature, sensor_id) needs to be broken down by "site name", which only exists in "sites" (site_id, site_name) — and readings has no site_id at all, only "sensors" (sensor_id, site_id) connects the two:
+{"datasetId":"readings.csv","joins":[{"datasetId":"sensors.csv","on":"sensor_id"},{"datasetId":"sites.csv","on":"site_id"}],"groupBy":["site_name"],"aggregations":[{"column":"temperature","fn":"avg","as":"avg_temperature"}],"chartType":"bar","chartX":"site_name","chartY":["avg_temperature"]}
 Do NOT join a dataset that the question doesn't actually need data from, even if a relationship to it exists — an extra join multiplies every row (and every sum) by however many matching rows it adds. Only include a join whose columns you will actually filter/groupBy/aggregate/select/chart by.
 
 Each relationship also carries a "cardinality". "1:N" means datasetA holds each key value once while datasetB repeats it; "N:1" is the reverse; "1:1" means both sides hold it once; "N:M" means neither does. Joining an N:M pair produces every combination of matching rows, which multiplies the data and inflates any total taken over it — only do that if the question genuinely asks about the combinations. When a one-side is joined to a many-side, each of the one-side's rows is duplicated, so a sum/average/count over one of ITS OWN columns afterwards counts the same value repeatedly: pick as "datasetId" the dataset that actually holds the number being aggregated, and join outwards from it.
@@ -295,12 +423,7 @@ The same column name can appear in several datasets and mean completely differen
 
 This system only aggregates and summarizes data that already exists — it has no forecasting, prediction, or trend-extrapolation capability. If asked to predict, forecast, or project a future value, do NOT invent one: plan the closest honest historical answer instead (e.g. the actual past trend), never name an aggregation "predicted_x"/"forecast_x", and use "reasoning" to note that forecasting isn't supported so the explanation reflects that limitation rather than presenting a fabricated number as a real prediction.`;
 
-  const ambiguityLine = ambiguities.length
-    ? `\n\nHeads up — this question's wording could mean more than one column:\n${ambiguities
-        .map((a) => `- "${a.concept}": ${a.candidates.map((c) => `"${c.column}" (${c.datasetName})`).join(" or ")}`)
-        .join("\n")}\nPick the one that most literally matches the question, and say which one you picked (and that alternatives exist) in "reasoning".`
-    : "";
-  const userMessage = `Datasets:\n${JSON.stringify(schemaContext, null, 2)}\n\nRelationships:\n${JSON.stringify(relationshipContext, null, 2)}${ambiguityLine}\n\nQuestion: ${question}${feedback ?? ""}`;
+  const userMessage = buildPlannerUserMessage(question, datasets, relationships, ambiguities, link, feedback);
 
   if (trace) {
     trace.systemPrompt = system;
@@ -326,17 +449,125 @@ This system only aggregates and summarizes data that already exists — it has n
     return plan;
   } catch (err) {
     if (err instanceof PlanParseError) throw err;
-    // The provider (rate limit, out-of-credits, transient outage) failing
-    // shouldn't take the whole app down — degrade to the deterministic
-    // keyword planner rather than surfacing a raw API error to the user.
-    console.error("planQuery: OpenRouter call failed, falling back to heuristic planner:", err);
-    if (trace) {
-      trace.ms = Date.now() - started;
-      trace.usedHeuristicFallback = true;
-      trace.fallbackKind = "provider-error";
-      trace.fallbackReason = `Every model/key in the chain failed (${err instanceof Error ? err.message : String(err)}), so the deterministic keyword planner ran instead.`;
+    if (trace) trace.ms = Date.now() - started;
+    throw new PlannerUnavailableError(`every model/key in the chain failed (last error: ${err instanceof Error ? err.message : String(err)}). Try again in a minute or add another API key.`);
+  }
+}
+
+// ─── Selection planner (semantic-layer mode) ──────────────────────────────
+//
+// The planner picks measures and dimensions from a menu and never writes a
+// join; compile-selection.ts turns the pick into an executable plan with the
+// joins worked out from the relationship graph. This is the published
+// "semantic layer" approach: the decision a small model gets wrong most —
+// which file, which key — is removed from it entirely.
+
+export type PlannerOutput =
+  | { kind: "selection"; selection: Selection }
+  | { kind: "plan"; plan: QueryPlan };
+
+const SELECTION_SYSTEM = `You are a query planner for a tabular data analysis tool. You are given a MENU of measures and dimensions across the uploaded files (each written as alias.column), the relationships between files, and a question. Output ONLY a JSON object (no markdown, no prose) matching this TypeScript type:
+
+type Selection = {
+  measures?: { ref: string; fn: "sum"|"avg"|"count"|"countDistinct"|"min"|"max"; as?: string }[]; // what to compute. ref is copied EXACTLY from the menu (alias.column) or is the "as" name of a derive below. "count" counts rows; "countDistinct" counts distinct values and works on any column — "how many members" over a table with one row per loan is countDistinct on the member id.
+  dimensions?: string[];        // refs to group by — "by industry" / "per team" / "for each plan". Omit for a single overall figure.
+  filters?: { ref: string; op: "eq"|"neq"|"gt"|"gte"|"lt"|"lte"|"contains"|"in"|"notIn"|"isNull"|"isNotNull"; value?: string|number|boolean|(string|number)[] }[]; // row filters. "in" takes a list — "returned or lost" is ONE filter: { ref, op: "in", value: ["Returned","Lost"] }; use the exact values listed in the menu. isNull matches blank cells (e.g. a return date that is empty = not yet returned).
+  derive?: { as: string; expr: string }[]; // a quantity that is not a column but a plain formula over menu refs: "alias.units_used * alias.rate_per_unit", "alias.gross * (1 - alias.deduction_pct / 100)". Arithmetic only. Then aggregate it via measures with ref = its "as".
+  dateBucket?: { ref: string; granularity: "day"|"month"|"year"; as?: string }; // for trends over time; the "as" name is grouped by automatically.
+  having?: { column: string; op: "eq"|"neq"|"gt"|"gte"|"lt"|"lte"; value: string|number }[]; // conditions on measure "as" names AFTER grouping (entities meeting a condition across several rows: "in every period", "in all three semesters").
+  without?: string[];           // table ALIASES the rows must have NO match in — "branches with no loans" = select branch fields, without: ["<loans alias>"].
+  select?: string[];            // refs to list, for a row listing (no measures). "top N rows by X" = select + sort + limit.
+  sort?: { column: string; direction: "asc"|"desc" }[]; // column is a measure "as" name, a dimension column name, or a selected column name. "most/highest/slowest/largest" = desc; "least/lowest/fastest/smallest" = asc.
+  limit?: number;
+  correlate?: { x: string; y: string }; // two numeric refs, when the question asks about correlation.
+  chartType?: "bar"|"stacked-bar"|"dot"|"line"|"area"|"pie"|"scatter"|"histogram"|"radar"|"treemap"|"heatmap"|"none";
+  chartX?: string; chartY?: string[]; // output column names
+  reasoning?: string;           // one sentence: which refs you chose and why
+};
+
+Rules:
+- Copy refs from the menu exactly. Never invent a column. If two files both have the column you need, pick the one whose table matches the question and say so in "reasoning".
+- You never write joins. Referencing fields from several tables is fine — they are joined automatically.
+- A question asking for a total/average/count needs a measure. "by X"/"per X" needs X as a dimension. A ranking of ROWS ("the 10 longest books") is select+sort+limit with no measure; a ranking of GROUPS ("top 5 genres by total pages") is dimension+measure+sort+limit.
+- Comparing values of one column ("open vs closed", "domestic vs export") is a dimension, not two filters.
+- If the question names a quantity that is not in the menu but is a formula over menu measures (a total built from a count times a rate, a net figure after a percentage deduction, a run-rate), write it in "derive" and aggregate the derived name.
+- "Slowest"/"most"/"highest" sort desc; "fastest"/"least"/"lowest" sort asc.
+- This tool only summarises data that exists: no forecasting or prediction. If the data cannot answer, say so in "reasoning" and give the closest honest selection.`;
+
+export async function planSelection(
+  question: string,
+  datasets: DatasetSchemaContext[],
+  relationships: RelationshipRecord[],
+  model: SemanticModel,
+  ambiguities: AmbiguityWarning[] = [],
+  userApiKey?: string,
+  trace?: LlmCallTrace,
+  feedback?: string,
+  link?: SchemaLink
+): Promise<PlannerOutput> {
+  const clients = getClients(userApiKey);
+  if (clients.length === 0) {
+    throw new PlannerUnavailableError("no API key is configured (neither a server key nor one set in the browser).");
+  }
+
+  const nameOf = (id: string) => datasets.find((d) => d.id === id)?.name ?? id;
+  const aliasOf = (id: string) => model.tables.find((t) => t.datasetId === id)?.alias ?? id;
+  const linkBlock = link && link.columns.length > 0
+    ? [
+        "",
+        "Schema link — worked out from the question and the data:",
+        ...link.columns.map((c) =>
+          c.datasetIds.length === 1
+            ? `- "${c.term}" → ${aliasOf(c.datasetIds[0])}.${c.column} (only in "${nameOf(c.datasetIds[0])}")`
+            : `- "${c.term}" → column "${c.column}" exists in ${c.datasetIds.map((id) => aliasOf(id)).join(", ")} — choose by table`
+        ),
+        ...(link.mentionedDatasetIds.length ? [`Tables the question names: ${link.mentionedDatasetIds.map(aliasOf).join(", ")}`] : []),
+      ].join("\n")
+    : "";
+  const ambiguityLine = ambiguities.length
+    ? `\n\nHeads up — this question's wording could mean more than one column:\n${ambiguities.map((a) => `- "${a.concept}": ${a.candidates.map((c) => `"${c.column}" (${c.datasetName})`).join(" or ")}`).join("\n")}\nPick the one that most literally matches the question and say which in "reasoning".`
+    : "";
+  // Focus: the tables the question links to, plus every table one join
+  // away from them — so a second fact table or a lookup for a name stays in
+  // full view. With no links at all, everything is shown.
+  const focus = new Set<string>();
+  if (link && (link.requiredDatasetIds.length > 0 || link.columns.some((c) => c.strength === "strong"))) {
+    for (const id of link.requiredDatasetIds) focus.add(id);
+    for (const j of link.joinPath) focus.add(j.datasetId);
+    for (const j of link.lookupJoins) focus.add(j.datasetId);
+    for (const c of link.columns) if (c.strength === "strong") for (const id of c.datasetIds) focus.add(id);
+    for (const id of [...focus]) for (const r of relationships) {
+      if (r.datasetIdA === id) focus.add(r.datasetIdB);
+      if (r.datasetIdB === id) focus.add(r.datasetIdA);
     }
-    return heuristicPlan(question, datasets, relationships);
+  }
+  const shownRels = relationships.filter((r) => focus.size === 0 || (focus.has(r.datasetIdA) && focus.has(r.datasetIdB)));
+  const userMessage = `${renderSemanticMenu(model, focus)}\n\nRelationships (joins are automatic; listed so you know which tables connect):\n${shownRels.map((r) => `- ${aliasOf(r.datasetIdA)}.${r.columnA} = ${aliasOf(r.datasetIdB)}.${r.columnB}${r.cardinality ? ` (${r.cardinality})` : ""}`).join("\n")}${linkBlock}${ambiguityLine}\n\nQuestion: ${question}${feedback ?? ""}`;
+
+  if (trace) {
+    trace.systemPrompt = SELECTION_SYSTEM;
+    trace.userPrompt = userMessage;
+  }
+
+  const started = Date.now();
+  try {
+    const { text, model: answered, finishReason } = await completeJson(clients, SELECTION_SYSTEM, userMessage, PLANNER_MAX_TOKENS);
+    if (trace) {
+      trace.model = answered;
+      trace.rawResponse = text;
+      trace.ms = Date.now() - started;
+      trace.finishReason = finishReason;
+    }
+    const parsed = extractJson<Record<string, unknown>>(text);
+    if (parsed && looksLikeSelection(parsed)) return { kind: "selection", selection: parsed as Selection };
+    // A model that answers in the older plan shape is still answering.
+    const asPlan = parsed as { datasetId?: unknown } | null;
+    if (asPlan && typeof asPlan.datasetId === "string") return { kind: "plan", plan: asPlan as unknown as QueryPlan };
+    throw new PlanParseError(text, answered, finishReason === "length");
+  } catch (err) {
+    if (err instanceof PlanParseError) throw err;
+    if (trace) trace.ms = Date.now() - started;
+    throw new PlannerUnavailableError(`every model/key in the chain failed (last error: ${err instanceof Error ? err.message : String(err)}). Try again in a minute or add another API key.`);
   }
 }
 

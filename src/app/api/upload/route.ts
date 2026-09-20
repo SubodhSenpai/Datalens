@@ -93,6 +93,7 @@ export async function POST(req: NextRequest) {
           blobUrl,
           rows: parsed.rows,
           sheetName: isXlsx ? parsed.sheetName : undefined,
+          notes: parsed.notes,
         };
         newRecords.push(record);
 

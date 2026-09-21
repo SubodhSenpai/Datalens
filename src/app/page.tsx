@@ -84,7 +84,7 @@ export default function HomePage() {
                   <FileSpreadsheet size={26} />
                 </div>
                 <strong className="font-display text-2xl">Drop files here</strong>
-                <span className="badge badge-emerald">CSV / XLSX · 10 files</span>
+                <span className="badge badge-emerald">CSV / XLSX</span>
               </div>
             ) : (
               <div className="flex flex-col gap-2">
@@ -126,7 +126,6 @@ export default function HomePage() {
       <footer className="border-t-2 border-ink py-6 px-6">
         <div className="max-w-5xl mx-auto flex items-center justify-between text-xs text-text-secondary font-semibold">
           <span>DataLens</span>
-          <span>Next.js · Qwen</span>
         </div>
       </footer>
     </main>

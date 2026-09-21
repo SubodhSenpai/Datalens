@@ -105,8 +105,7 @@ export default function ApiKeySettings({ value, onChange }: ApiKeySettingsProps)
           className="glass-card absolute left-4 right-4 top-full mt-2 z-30 p-4 bg-bg-card animate-[fadeIn_0.15s_ease_forwards]"
         >
           <p className="text-[12px] font-medium text-text-secondary leading-relaxed mb-3">
-            Bring your own key for this browser — OpenRouter or Google Gemini; the provider is recognised from the key itself. It&apos;s stored only in your{" "}
-            <code className="font-mono">localStorage</code> and sent with each query — never saved on the server.
+            Your own OpenRouter or Gemini key, detected automatically. Kept in this browser only.
           </p>
           <input
             id="api-key-input"

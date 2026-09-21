@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { Sparkles, Plus, ChevronRight } from "lucide-react";
 import FileUpload from "@/components/FileUpload";
@@ -14,6 +14,39 @@ import ApiKeySettings, { loadStoredApiKey } from "@/components/ApiKeySettings";
 import { DatasetFile, DatasetLink, QueryMode, QueryResult, Session } from "@/lib/types";
 import { generateSessionId } from "@/lib/utils";
 
+// Sidebar width is user-adjustable by dragging its right edge; the last value
+// is remembered in this browser. Bounds keep the file cards readable and
+// leave the results panel room on a laptop screen. Held in a tiny external
+// store (same pattern as the query mode) so the server render and the first
+// client frame agree, then the remembered width applies.
+const SIDEBAR_DEFAULT = 280;
+const SIDEBAR_MIN = 220;
+const SIDEBAR_MAX = 520;
+const SIDEBAR_WIDTH_KEY = "datalens.sidebarWidth";
+let sidebarWidthValue: number | null = null;
+const sidebarListeners = new Set<() => void>();
+const subscribeSidebar = (cb: () => void) => { sidebarListeners.add(cb); return () => { sidebarListeners.delete(cb); }; };
+const readSidebarWidth = () => {
+  if (sidebarWidthValue === null) {
+    sidebarWidthValue = SIDEBAR_DEFAULT;
+    try {
+      const stored = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
+      if (stored >= SIDEBAR_MIN && stored <= SIDEBAR_MAX) sidebarWidthValue = stored;
+    } catch { /* storage blocked — default width */ }
+  }
+  return sidebarWidthValue;
+};
+const writeSidebarWidth = (width: number, persist: boolean) => {
+  sidebarWidthValue = width;
+  if (persist) {
+    try {
+      if (width === SIDEBAR_DEFAULT) window.localStorage.removeItem(SIDEBAR_WIDTH_KEY);
+      else window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width));
+    } catch { /* ignore */ }
+  }
+  sidebarListeners.forEach((cb) => cb());
+};
+
 export default function DashboardPage() {
   const [session, setSession] = useState<Session | null>(() => ({
     id: generateSessionId(), createdAt: new Date(), datasets: [], totalSize: 0,
@@ -23,6 +56,29 @@ export default function DashboardPage() {
   const [showUpload, setShowUpload] = useState(false);
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState(() => loadStoredApiKey());
+  const sidebarWidth = useSyncExternalStore(subscribeSidebar, readSidebarWidth, () => SIDEBAR_DEFAULT);
+
+  const startSidebarResize = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = readSidebarWidth();
+    const onMove = (ev: PointerEvent) => {
+      writeSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startWidth + ev.clientX - startX)), false);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      writeSidebarWidth(readSidebarWidth(), true);
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }, []);
+
+  const resetSidebarWidth = useCallback(() => writeSidebarWidth(SIDEBAR_DEFAULT, true), []);
 
   const handleFilesUploaded = useCallback((newDatasets: DatasetFile[], links: DatasetLink[]) => {
     setSession(prev => {
@@ -74,7 +130,10 @@ export default function DashboardPage() {
     <div className="flex h-screen overflow-hidden relative z-10">
 
       {/* ── SIDEBAR ── */}
-      <aside className="w-[280px] shrink-0 bg-bg-surface border-r-2 border-ink flex flex-col overflow-y-auto overflow-x-hidden">
+      <aside
+        style={{ width: sidebarWidth }}
+        className="shrink-0 bg-bg-surface border-r-2 border-ink flex flex-col overflow-y-auto overflow-x-hidden"
+      >
 
         {/* Logo */}
         <div className="px-5 h-16 flex items-center border-b-2 border-ink shrink-0">
@@ -143,6 +202,20 @@ export default function DashboardPage() {
           </div>
         )}
       </aside>
+
+      {/* Drag handle: sits over the sidebar border, zero layout width. Double-click resets. */}
+      <div
+        id="sidebar-resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-valuenow={sidebarWidth}
+        aria-valuemin={SIDEBAR_MIN}
+        aria-valuemax={SIDEBAR_MAX}
+        title="Drag to resize · double-click to reset"
+        onPointerDown={startSidebarResize}
+        onDoubleClick={resetSidebarWidth}
+        className="w-2 -mx-1 shrink-0 z-20 cursor-col-resize hover:bg-mustard/70 active:bg-mustard transition-colors"
+      />
 
       {/* ── MAIN ── */}
       <main className="flex-1 flex flex-col overflow-hidden relative">

@@ -8,7 +8,7 @@ Needs Node.js 20+ and git.
 
 ```bash
 git clone https://github.com/SubodhSenpai/Datalens.git
-cd Datalens/fde-app
+cd Datalens
 npm ci
 cp .env.example .env          # PowerShell: Copy-Item .env.example .env
 # put ONE model key in .env:  OPENROUTER_API_KEY=sk-or-...   or   GEMINI_API_KEY=AIza...
@@ -32,7 +32,7 @@ Optional: `LLM_PROVIDER`, `OPENROUTER_MODEL`, `GEMINI_MODEL`, `PLAN_CONSENSUS` â
 
 ## Deploy to Vercel
 
-1. Import the repo, root directory `fde-app`.
+1. Import the repo in Vercel (root directory = repo root).
 2. Storage â†’ create a Blob store and connect it (adds `BLOB_READ_WRITE_TOKEN`).
 3. Environment Variables: `NEXT_PUBLIC_BLOB_CLIENT_UPLOADS=1` plus your model key(s).
 4. Redeploy (env vars are compiled in at build time).

@@ -86,6 +86,16 @@ SET=validation-v3 TIERS=2,3 npx tsx scripts/run-tier2-v2.ts       # sensor set
 SET=validation TIERS=2 ONLY=2.1,2.3 npx tsx scripts/run-tier2-v2.ts
 ```
 
+## Constraints (by design)
+
+- **Keys.** A key pasted in the UI stays in that browser and is used only for that user's requests; users without one share the server keys in `.env`. Free tiers are rate-limited per key, so shared server keys are the first thing to run out.
+- **Model plans, never computes.** With no reachable model the app says so — there is no keyword fallback. A question the plan language cannot express gets a simpler answer, stated as such.
+- **Plan language.** Single-block plans: no chained sub-queries, window functions, pivots, date buckets matched to period labels in another file, or binned histograms. One question at a time — no conversational memory.
+- **Serverless.** Nothing persists between requests; each question re-reads the session's files from Blob. Requests and responses are capped at ≈ 4.5 MB (large uploads go browser → Blob; answers returning tens of thousands of raw rows can exceed it). 60 s per call.
+- **Sessions.** Isolation is a random session id, no accounts; blobs are private. Files persist until a dataset is deleted — no timed cleanup.
+- **Data.** CSV / XLSX / XLS, one table per sheet, header within the first 15 rows; 25 files × 25 MB, 100 MB per session.
+- **Heuristics.** Key inference, sentinel detection and spelling unification use thresholds (≥ 90 % unique, all-nines value > 3× outside the spread, ≤ 50 distinct values). Unusual data can be misjudged, which is why every intervention is shown on the file card.
+
 ## Layout
 
 ```

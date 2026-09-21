@@ -36,6 +36,12 @@ Latest complete live runs, graded strictly (value must match the key):
 
 Eight offline suites (guard rules, compiler, golden plans, validator, relationships, adversarial joins, schema linking, a 25-file scale benchmark) run in seconds without a model and separate engine regressions from model variance. The golden suite holds the hardest sensor questions as correct plans — exceedance counts and shares against a limit from another sheet, the peak with its timestamp, a two-hop anti-join, a temperature–ozone correlation paired by station and time (r = 0.357, n = 4,405, the generator's own figure).
 
+## Bringing your own model
+
+Every model call goes through one OpenAI-compatible interface (`providers.ts`: base URL, model chain, key shape, token budget). Today that table holds OpenRouter's free open-source models and Google Gemini; a key pasted in the UI is recognised by its shape, kept in the browser, and used only for that user — so each user already spends their own quota.
+
+Adding a paid provider is one row in that table, not new code paths: OpenAI (`sk-…`), Anthropic (`sk-ant-…`), Mistral, Groq and Azure OpenAI all speak the same chat-completions shape or ship an OpenAI-compatible endpoint. What I would add on top: a model picker per user (paid tiers remove the 429/503 variance that causes most remaining misses), per-question cost shown next to the trace, and an organisation key stored server-side with per-user rate limits — so a team can run on one paid account while a visitor still brings their own key.
+
 ## What I'd build next
 
 1. **Plan cache and provider health** — cache plans by schema fingerprint + normalised question; skip a model for ten minutes after repeated 503s.

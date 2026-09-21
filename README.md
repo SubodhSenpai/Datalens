@@ -52,17 +52,19 @@ Ambiguity / guardrail tier (off-topic, mutation requests, no data for the period
 
 ## Techniques
 
+All code is original. The references are the prior art each idea follows; none were ported.
+
 | Stage | Technique | Ref. |
 |---|---|---|
-| Loading | placeholder blanks, formatted numbers (`₹4,80,02,573.75`, `(500)`, `12%`, `9.5 lakh`), per-column day/month order, missing-value codes (`-999`), summary-row exclusion, spelling unification — each reported | [1] |
-| Relationships | PK/FK inference from uniqueness + inclusion dependencies, cardinality classes, key-ness gate against low-cardinality columns | [2], [3] |
-| Semantic model | tables / measures / dimensions menu the model selects from; long-format (`parameter`/`unit` → `value`) and QC-flag detection | [4] |
-| Schema linking | question → column matching (stem, plural, abbreviation), BFS join paths, schema pruning to linked tables + one hop | [5], [6] |
+| Loading | placeholder blanks, formatted numbers (`₹4,80,02,573.75`, `(500)`, `12%`, `9.5 lakh`), per-column day/month order, missing-value codes (`-999`), summary-row exclusion, spelling unification — each reported | — |
+| Relationships | PK/FK inference from uniqueness + value inclusion, cardinality classes, key-ness gate against low-cardinality columns | [1] |
+| Semantic model | tables / measures / dimensions menu the model selects from; long-format (`parameter`/`unit` → `value`) and QC-flag detection | [2] |
+| Schema linking | lexical question → column matching (stem, plural, abbreviation), BFS join paths, schema pruned to linked tables + one hop | — |
 | Compilation | join path, post-join naming, column-vs-column filters, conditional measures, post-aggregation derives, multi-hop anti-joins | — |
-| Multi-fact | one sub-plan per fact table, merged on shared dimensions (no chasm/fan-trap row joins) | [7], [8] |
-| Verification | deterministic validator + 10 structural answer-check rules, feedback retry ≤ 3 | [9], [10] |
-| Consensus | second independent draft on cross-file questions, compared on computed signature, reconciled on disagreement | [11] |
-| Charts | type chosen from question and result shape; default bar/line for grouped results | [12] |
+| Multi-fact | one sub-plan per fact table, merged on shared dimensions — no row-level join between facts | [3], [4] |
+| Verification | deterministic validator + 10 structural answer-check rules, feedback retry ≤ 3 | [5] |
+| Consensus | second independent draft on cross-file questions, compared on computed signature, reconciled on disagreement | [6] |
+| Charts | type chosen from question and result shape (vendor guidance cited inline in `src/lib/chart-eval/reference.ts`); default bar/line for grouped results | — |
 
 ## Tests
 
@@ -95,15 +97,9 @@ test-data/      validation sets with answer keys
 
 ## References
 
-1. I. F. Ilyas, X. Chu, *Data Cleaning*, ACM Books, 2019.
-2. T. Papenbrock, S. Kruse, J.-A. Quiané-Ruiz, F. Naumann, "Divide & Conquer-based Inclusion Dependency Discovery," *PVLDB* 8(7), 2015.
-3. Y. He et al., "Auto-BI: Automatically Build BI-Models Leveraging Local Join Prediction and Global Schema Graph," *PVLDB* 16(10), 2023.
-4. dbt Labs, "How the dbt Semantic Layer works," 2024 — https://www.getdbt.com/blog/how-the-dbt-semantic-layer-works
-5. H. Li, J. Zhang, C. Li, H. Chen, "RESDSQL: Decoupling Schema Linking and Skeleton Parsing for Text-to-SQL," *AAAI*, 2023.
-6. S. Talaei et al., "CHESS: Contextual Harnessing for Efficient SQL Synthesis," arXiv:2405.16755, 2024.
-7. Google Cloud, "Looker: Understanding symmetric aggregates" — https://cloud.google.com/looker/docs/best-practices/understanding-symmetric-aggregates
-8. Sisense, "Chasm and fan traps" — https://docs.sisense.com/main/SisenseLinux/chasm-and-fan-traps.htm
-9. M. Pourreza, D. Rafiei, "DIN-SQL: Decomposed In-Context Learning of Text-to-SQL with Self-Correction," *NeurIPS*, 2023.
-10. B. Wang et al., "MAC-SQL: A Multi-Agent Collaborative Framework for Text-to-SQL," *COLING*, 2025.
-11. X. Wang et al., "Self-Consistency Improves Chain of Thought Reasoning in Language Models," *ICLR*, 2023.
-12. W. S. Cleveland, R. McGill, "Graphical Perception: Theory, Experimentation, and Application to the Development of Graphical Methods," *J. Amer. Statist. Assoc.* 79(387), 1984.
+1. T. Papenbrock, S. Kruse, J.-A. Quiané-Ruiz, F. Naumann, "Divide & Conquer-based Inclusion Dependency Discovery," *PVLDB* 8(7), 2015.
+2. dbt Labs, "How the dbt Semantic Layer works," 2024 — https://www.getdbt.com/blog/how-the-dbt-semantic-layer-works
+3. Google Cloud, "Looker: Understanding symmetric aggregates" — https://cloud.google.com/looker/docs/best-practices/understanding-symmetric-aggregates
+4. Sisense, "Chasm and fan traps" — https://docs.sisense.com/main/SisenseLinux/chasm-and-fan-traps.htm
+5. M. Pourreza, D. Rafiei, "DIN-SQL: Decomposed In-Context Learning of Text-to-SQL with Self-Correction," *NeurIPS*, 2023.
+6. X. Wang et al., "Self-Consistency Improves Chain of Thought Reasoning in Language Models," *ICLR*, 2023.

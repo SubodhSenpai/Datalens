@@ -40,6 +40,7 @@ Try it: upload the four files in `test-data/validation-v2/` and ask *Total invoi
 | `BLOB_READ_WRITE_TOKEN` | hosted only | Vercel Blob token |
 | `NEXT_PUBLIC_BLOB_CLIENT_UPLOADS` | hosted only | `1` — browser uploads straight to Blob (serverless request cap ≈ 4.5 MB) |
 | `CRON_SECRET` | hosted only | any long random string — authorises the daily cleanup cron |
+| `NEXT_PUBLIC_SITE_URL` | hosted only | public URL for canonical links, sitemap and Open Graph (defaults to the Vercel URL) |
 
 Optional: `LLM_PROVIDER`, `OPENROUTER_MODEL`, `GEMINI_MODEL`, `PLAN_CONSENSUS`, `SESSION_TTL_HOURS` — see `.env.example`.
 

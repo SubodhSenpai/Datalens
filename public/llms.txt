@@ -1,0 +1,35 @@
+# DataLens
+
+> Ask CSV and Excel files anything in plain English. A language model plans the query; a deterministic engine computes the table, chart and explanation and shows the full trace. Free, open source (MIT), runs on free open-source models.
+
+Site: https://datalens-six-rouge.vercel.app
+Source: https://github.com/SubodhSenpai/Datalens
+
+## What it does
+- Upload CSV, XLSX or XLS files (25 files, 25 MB each per session).
+- Cleans real-world exports: formatted numbers (₹4,80,000, 9.5 lakh, (500), 12%), mixed date formats, blank placeholders, -999 codes, TOTAL rows — every fix reported.
+- Detects keys shared between files and joins them; two fact tables are aggregated separately and merged, never row-joined.
+- The model only selects measures, dimensions and filters from a menu; a compiler builds joins, a validator repairs the plan, ten structural answer-check rules trigger a retry with feedback.
+- Numbers are computed by code, not by the model. Every answer shows the plan, corrections and a pandas equivalent.
+
+## Models
+- Free open-source models via OpenRouter (Qwen, Gemma, GLM, Nemotron) or Google Gemini, with fallback and key rotation.
+- Users can paste their own key; it stays in the browser. No model reachable → no answer, never a keyword fallback.
+
+## Accuracy
+- Three generated validation sets with computed answer keys: single-file 33/33, cross-file 51/60 exact.
+
+## Privacy
+- Files are stored privately per session and deleted on removal or after 24 h idle. The model receives column names, a few example values and a preview of the computed result — never the whole file.
+
+## FAQ
+- What is DataLens? A web app that answers questions about CSV and Excel files in plain English. A language model writes a small query plan; a deterministic engine computes the table, chart and explanation and shows the full trace.
+- Which files can I upload? CSV, XLSX and XLS, up to 25 files and 25 MB each per session. Formatted numbers, mixed date formats, placeholders, -999 codes and TOTAL rows are cleaned and every fix is reported.
+- Can it answer across several files? Yes. Shared keys are detected from uniqueness and value overlap; two fact tables are aggregated separately and merged, so nothing is double counted.
+- Which models does it use? Free open-source models via OpenRouter (Qwen, Gemma, GLM, Nemotron) or Google Gemini, with fallback. A user's own key stays in the browser. No model reachable means no answer, never a guess.
+- Is my data stored or sent to the model? Files are private per session and deleted on removal or after 24 h idle. The model sees column names, a few example values and a preview of the computed result, never the whole file.
+- How accurate is it? Numbers are computed by code. On three generated validation sets: single-file 33/33, cross-file 51/60 exact; each answer shows the plan it ran.
+- Is it free and open source? Yes, MIT-licensed; source, validation sets and test suites are on GitHub.
+
+## Stack
+- Next.js 16, React 19, TypeScript, Tailwind 4, Recharts, Vercel Blob.

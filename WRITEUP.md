@@ -31,14 +31,11 @@ Three generated data sets, fixed seeds, every expected answer computed by the ge
 
 Graded strictly: **cross-file 51 / 60 = 85 %** (95 % counting defensible readings), single-file 33 / 33, guardrail tier 9 / 12. Charts on every grouped or trend result. Remaining misses: model variance on the weakest free tier, provider timeouts, and two shapes not built (a date bucket matched to period labels; binned histograms). Eight offline suites run without a model and separate engine bugs from model variance.
 
-## Bringing your own model
-
-All model calls go through one OpenAI-compatible provider table (`providers.ts`). A key pasted in the UI is recognised by its shape, stays in the browser and is used only for that user. Adding OpenAI, Anthropic, Mistral, Groq or Azure is one row in that table. Next: a per-user model picker (paid tiers remove most of the remaining variance), cost shown next to the trace, and a server-side organisation key with per-user limits.
-
 ## What I'd build next
 
-1. **Plan cache and provider health** — reuse plans for repeated questions; skip a model for ten minutes after repeated 503s.
-2. **Chained plans** — a plan that reads another plan's output covers the last missing shapes.
-3. **Data-contract defaults** — quality-flag and unit policies applied on load, with an opt-out.
-4. **Follow-up context** — carry the previous plan into "now only for June".
-5. **A compiler symbol table** — resolve column identity once, not by name at each stage.
+1. **Bring your own paid model** — all calls already go through one OpenAI-compatible provider table (`providers.ts`), and a key pasted in the UI stays in the browser and is used only for that user; today that covers OpenRouter and Gemini. Adding OpenAI, Mistral or Groq is one row in the table, Anthropic and Azure a small adapter, plus a per-user model picker (paid tiers remove most of the remaining variance) and per-question cost beside the trace.
+2. **Plan cache and provider health** — reuse plans for repeated questions; skip a model for ten minutes after repeated 503s.
+3. **Chained plans** — a plan that reads another plan's output covers the last missing shapes.
+4. **Data-contract defaults** — quality-flag and unit policies applied on load, with an opt-out.
+5. **Follow-up context** — carry the previous plan into "now only for June".
+6. **A compiler symbol table** — resolve column identity once, not by name at each stage.

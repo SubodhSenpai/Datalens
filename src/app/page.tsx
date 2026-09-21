@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   Upload, Database, BarChart3, FileSpreadsheet,
-  ArrowRight, CheckCircle2, Sparkles, Shield,
+  ArrowRight, CheckCircle2, Sparkles,
 } from "lucide-react";
 
 const FEATURES = [
@@ -107,7 +107,7 @@ export default function HomePage() {
       </section>
 
       {/* ── FEATURES — flat color blocks, icon + one word ── */}
-      <section className="px-6 pb-20">
+      <section className="px-6 pb-24">
         <div className="max-w-3xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-4">
           {FEATURES.map((f, i) => (
             <div
@@ -119,14 +119,6 @@ export default function HomePage() {
               <span className="font-display font-bold text-sm">{f.title}</span>
             </div>
           ))}
-        </div>
-      </section>
-
-      {/* ── TRUST STRIP ── */}
-      <section className="px-6 pb-24">
-        <div className="max-w-3xl mx-auto glass-card bg-navy text-bg-base p-6 flex items-center justify-center gap-3 rotate-[-0.5deg]">
-          <Shield size={18} />
-          <span className="font-display font-bold text-lg">Nothing saved. Session-only.</span>
         </div>
       </section>
 

@@ -116,16 +116,16 @@ export default function ApiKeySettings({ value, onChange }: ApiKeySettingsProps)
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && save()}
-            className="w-full px-3 py-2 mb-1 text-[13px] font-mono bg-bg-surface border-2 border-ink rounded-xl outline-none focus:bg-mint/20"
+            className="w-full px-3 py-2 mb-3 text-[13px] font-mono bg-bg-surface border-2 border-ink rounded-xl outline-none focus:bg-mint/20"
           />
-          <p id="api-key-provider" className={`flex items-center gap-1 mb-3 text-[11px] font-semibold ${typed ? (typed.recognised ? "text-sage-dark" : "text-mustard-dark") : "text-text-muted"}`}>
-            <Sparkles size={11} />
-            {typed
-              ? typed.recognised
+          {typed && (
+            <p id="api-key-provider" className={`flex items-center gap-1 -mt-2 mb-3 text-[11px] font-semibold ${typed.recognised ? "text-sage-dark" : "text-mustard-dark"}`}>
+              <Sparkles size={11} />
+              {typed.recognised
                 ? `${PROVIDERS[typed.id].label} key recognised — models: ${PROVIDERS[typed.id].models.slice(0, 2).join(", ")}, …`
-                : "Key shape not recognised — it will be sent to OpenRouter"
-              : "Paste a key to see which provider it belongs to"}
-          </p>
+                : "Key shape not recognised — it will be sent to OpenRouter"}
+            </p>
+          )}
           <div className="flex items-center gap-2">
             <button id="api-key-save" onClick={save} className="btn-primary flex-1 justify-center py-1.5 text-[13px]">
               <Check size={13} /> Save

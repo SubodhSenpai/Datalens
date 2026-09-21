@@ -11,6 +11,7 @@
   <img alt="OpenRouter" src="https://img.shields.io/badge/OpenRouter-free_OSS_models-6E56CF">
   <img alt="Gemini" src="https://img.shields.io/badge/Google_Gemini-4285F4?logo=google&logoColor=white">
   <img alt="Vercel Blob" src="https://img.shields.io/badge/Vercel_Blob-000000?logo=vercel&logoColor=white">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-green"></a>
 </p>
 
 ## Run locally
@@ -103,3 +104,7 @@ test-data/      validation sets with answer keys
 4. Sisense, "Chasm and fan traps" — https://docs.sisense.com/main/SisenseLinux/chasm-and-fan-traps.htm
 5. M. Pourreza, D. Rafiei, "DIN-SQL: Decomposed In-Context Learning of Text-to-SQL with Self-Correction," *NeurIPS*, 2023.
 6. X. Wang et al., "Self-Consistency Improves Chain of Thought Reasoning in Language Models," *ICLR*, 2023.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

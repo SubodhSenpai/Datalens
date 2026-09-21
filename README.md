@@ -52,19 +52,19 @@ Ambiguity / guardrail tier (off-topic, mutation requests, no data for the period
 
 ## Techniques
 
-All code is original. The references are the prior art each idea follows; none were ported.
+All code is original. Where a row cites a reference, the *Basis* column states the one idea taken from it; everything else is own design.
 
-| Stage | Technique | Ref. |
+| Stage | Technique | Basis |
 |---|---|---|
-| Loading | placeholder blanks, formatted numbers (`₹4,80,02,573.75`, `(500)`, `12%`, `9.5 lakh`), per-column day/month order, missing-value codes (`-999`), summary-row exclusion, spelling unification — each reported | — |
-| Relationships | PK/FK inference from uniqueness + value inclusion, cardinality classes, key-ness gate against low-cardinality columns | [1] |
-| Semantic model | tables / measures / dimensions menu the model selects from; long-format (`parameter`/`unit` → `value`) and QC-flag detection | [2] |
-| Schema linking | lexical question → column matching (stem, plural, abbreviation), BFS join paths, schema pruned to linked tables + one hop | — |
-| Compilation | join path, post-join naming, column-vs-column filters, conditional measures, post-aggregation derives, multi-hop anti-joins | — |
-| Multi-fact | one sub-plan per fact table, merged on shared dimensions — no row-level join between facts | [3], [4] |
-| Verification | deterministic validator + 10 structural answer-check rules, feedback retry ≤ 3 | [5] |
-| Consensus | second independent draft on cross-file questions, compared on computed signature, reconciled on disagreement | [6] |
-| Charts | type chosen from question and result shape (vendor guidance cited inline in `src/lib/chart-eval/reference.ts`); default bar/line for grouped results | — |
+| Loading | placeholder blanks, formatted numbers (`₹4,80,02,573.75`, `(500)`, `12%`, `9.5 lakh`), per-column day/month order, missing-value codes (`-999`), summary-row exclusion, spelling unification — each reported | own design |
+| Relationships | PK/FK inference from uniqueness + value inclusion, cardinality classes, key-ness gate against low-cardinality columns | [1] a foreign key is a column whose values are contained in a unique column elsewhere (inclusion dependency); the test is implemented directly, not their algorithm |
+| Semantic model | tables / measures / dimensions menu; long-format (`parameter`/`unit` → `value`) and QC-flag detection | [2] the model selects measures and dimensions from a semantic layer and never writes joins |
+| Schema linking | lexical question → column matching (stem, plural, abbreviation), BFS join paths, schema pruned to linked tables + one hop | own design |
+| Compilation | join path, post-join naming, column-vs-column filters, conditional measures, post-aggregation derives, multi-hop anti-joins | own design |
+| Multi-fact | one sub-plan per fact table, merged on shared dimensions — no row-level join between facts | [3] aggregate each fact table on its own, then combine (symmetric aggregates); [4] the chasm / fan-trap double counting this avoids |
+| Verification | deterministic validator + 10 structural answer-check rules, feedback retry ≤ 3 | [5] a structured plan is checked and the model re-asked with concrete feedback (self-correction) |
+| Consensus | second independent draft on cross-file questions, compared on computed signature, reconciled on disagreement | [6] independent drafts of the same answer must agree; ours reconciles instead of voting |
+| Charts | type chosen from question and result shape; default bar/line for grouped results | vendor chart-selection guidance, cited inline in `src/lib/chart-eval/reference.ts` |
 
 ## Tests
 

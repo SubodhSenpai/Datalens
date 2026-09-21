@@ -9,10 +9,10 @@ import {
 } from "lucide-react";
 
 const FEATURES = [
-  { icon: <Upload size={22} />, title: "Drop files", bg: "bg-mint" },
-  { icon: <Sparkles size={22} />, title: "Ask plainly", bg: "bg-mustard" },
-  { icon: <BarChart3 size={22} />, title: "See charts", bg: "bg-sage" },
-  { icon: <Database size={22} />, title: "Cross-file", bg: "bg-sky" },
+  { icon: <Upload size={22} />, title: "Any spreadsheet", bg: "bg-mint" },
+  { icon: <Sparkles size={22} />, title: "Natural language", bg: "bg-mustard" },
+  { icon: <BarChart3 size={22} />, title: "Instant charts", bg: "bg-sage" },
+  { icon: <Database size={22} />, title: "Cross-file joins", bg: "bg-sky" },
 ];
 
 export default function HomePage() {
@@ -51,7 +51,7 @@ export default function HomePage() {
             <span className="text-xl font-display font-bold tracking-tight">DataLens</span>
           </Link>
           <button id="nav-launch-btn" className="btn-primary text-sm" onClick={() => router.push("/dashboard")}>
-            Launch <ArrowRight size={14} />
+            Try free <ArrowRight size={14} />
           </button>
         </div>
       </nav>
@@ -61,7 +61,7 @@ export default function HomePage() {
         <div className="max-w-3xl mx-auto text-center flex flex-col items-center gap-8 animate-[fadeIn_0.5s_ease_forwards]">
 
           <h1 className="font-display text-5xl md:text-6xl font-extrabold leading-[1.05] -rotate-1">
-            Ask your files
+            Ask Excel &amp; CSV
             <br />
             <span className="inline-block bg-mustard px-4 py-1 rounded-2xl border-2 border-ink rotate-1 mt-2">anything.</span>
           </h1>
@@ -83,7 +83,7 @@ export default function HomePage() {
                 <div className="w-14 h-14 rounded-full bg-bg-card border-2 border-ink flex items-center justify-center animate-[float_3s_ease-in-out_infinite]">
                   <FileSpreadsheet size={26} />
                 </div>
-                <strong className="font-display text-2xl">Drop files here</strong>
+                <strong className="font-display text-2xl">Drop spreadsheets</strong>
                 <span className="badge badge-emerald">CSV / XLSX</span>
               </div>
             ) : (

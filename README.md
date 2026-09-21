@@ -24,7 +24,8 @@ npm run dev               # http://localhost:3000
 | `OPENROUTER_API_KEY` | OpenRouter key (`sk-or-…`). Only free open-source models are used (Qwen 3.8, Gemma 4, GLM 5.2, Nemotron …). Add `OPENROUTER_API_KEY2`, `…3` to rotate keys — the free daily quota is per account. |
 | `GEMINI_API_KEY` | Google AI Studio key (`AIza…` / `AQ.…`). Tried before OpenRouter when both are set; `LLM_PROVIDER=openrouter` flips that. |
 | `OPENROUTER_MODEL`, `GEMINI_MODEL` | optional — put one model at the front of that provider's fallback chain |
-| `BLOB_READ_WRITE_TOKEN` | optional — Vercel Blob for uploads. Without it files stay in memory, which is fine for local use. |
+| `BLOB_READ_WRITE_TOKEN` | Vercel Blob for uploads — required on Vercel, optional locally (files stay in memory). |
+| `NEXT_PUBLIC_BLOB_CLIENT_UPLOADS` | set to `1` on Vercel so files go from the browser straight to Blob; a serverless function only accepts ~4.5 MB per request, which a 7 MB workbook exceeds. Build-time value — redeploy after setting it. |
 
 Visitors can also paste their own key in the UI (top of the sidebar). The provider is recognised from the key's shape and the key never leaves the browser except with the request it authorises.
 

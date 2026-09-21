@@ -3,6 +3,15 @@
 import { useState, useCallback, useRef } from "react";
 import { Upload, FileSpreadsheet, X, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { DatasetFile, DatasetLink } from "@/lib/types";
+import { upload as blobUpload } from "@vercel/blob/client";
+
+// Set NEXT_PUBLIC_BLOB_CLIENT_UPLOADS=1 on deployments that have Blob
+// storage: files then go from the browser straight to Blob and only their
+// URLs reach the server, which sidesteps the platform's request-body cap
+// (~4.5 MB per request) that a 7 MB workbook would otherwise hit.
+const CLIENT_UPLOADS = process.env.NEXT_PUBLIC_BLOB_CLIENT_UPLOADS === "1";
+// Requests under this size are sent inline even then — one round trip.
+const INLINE_LIMIT_BYTES = 3 * 1024 * 1024;
 import { validateFile, formatBytes } from "@/lib/utils";
 import { MAX_FILES, MAX_SESSION_SIZE_MB } from "@/lib/types";
 
@@ -67,11 +76,26 @@ export default function FileUpload({ sessionId, existingCount, existingSize, onU
     setIsSubmitting(true);
     setSubmitError(null);
     try {
-      const form = new FormData();
-      form.set("sessionId", sessionId);
-      ready.forEach((p) => form.append("files", p.file));
-
-      const res = await fetch("/api/upload", { method: "POST", body: form });
+      let res: Response;
+      if (CLIENT_UPLOADS && readySize > INLINE_LIMIT_BYTES) {
+        // Browser → Blob, one file at a time, then tell the server where they are.
+        const blobs: { name: string; url: string; size: number }[] = [];
+        for (const p of ready) {
+          const stored = await blobUpload(`sessions/${sessionId}/${Date.now()}-${p.file.name}`, p.file, {
+            access: "private",
+            handleUploadUrl: "/api/upload/blob",
+            clientPayload: JSON.stringify({ sessionId }),
+            contentType: p.file.name.toLowerCase().endsWith(".csv") ? "text/csv" : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          });
+          blobs.push({ name: p.file.name, url: stored.url, size: p.file.size });
+        }
+        res = await fetch("/api/upload", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sessionId, blobs }) });
+      } else {
+        const form = new FormData();
+        form.set("sessionId", sessionId);
+        ready.forEach((p) => form.append("files", p.file));
+        res = await fetch("/api/upload", { method: "POST", body: form });
+      }
       const data = await res.json();
 
       if (!res.ok) {

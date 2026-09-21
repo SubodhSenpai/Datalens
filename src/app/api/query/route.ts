@@ -17,6 +17,8 @@ import { linkSchema } from "@/lib/schema-linking";
 import { answerWithRag } from "./rag";
 
 export const runtime = "nodejs";
+// Three planner calls plus an explanation, each with provider fallbacks.
+export const maxDuration = 60;
 
 // Planner calls per question, including the first. Each retry is a real
 // LLM call, so this is a hard ceiling rather than a target.

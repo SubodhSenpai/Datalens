@@ -1,11 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { DatasetFile, DatasetLink, MAX_FILES, MAX_FILE_SIZE_MB, MAX_SESSION_SIZE_MB, SUPPORTED_FORMATS } from "@/lib/types";
 import { parseCSVBuffer, parseXLSXBuffer } from "@/lib/parse";
-import { uploadFile } from "@/lib/blob";
+import { uploadFile, getBlobBuffer } from "@/lib/blob";
 import { getOrCreateSession, getSessionTotalSize, addDatasets, DatasetRecord } from "@/lib/session-store";
 import { detectRelationships } from "@/lib/relationships";
 
 export const runtime = "nodejs";
+// Parsing a 30k-row workbook and detecting relationships across a session
+// takes longer than the 10 s default on some plans.
+export const maxDuration = 60;
+
+/** One incoming file, whether it arrived in the request or was put in Blob by the browser. */
+interface Incoming { name: string; size: number; bytes: () => Promise<Buffer>; blobUrl?: string }
 
 /**
  * POST /api/upload
@@ -16,13 +22,32 @@ export const runtime = "nodejs";
  * Covers Figure 2 (Blob storage) and Figure 3 (Data Processing Module).
  */
 export async function POST(req: NextRequest) {
-  const form = await req.formData();
-  const sessionId = form.get("sessionId");
-  if (typeof sessionId !== "string" || !sessionId) {
+  // Two ways in. Multipart carries the bytes (local dev, small files). JSON
+  // carries references to blobs the browser already uploaded directly —
+  // the only way past the platform's request-body limit for large files.
+  let sessionId: string;
+  let files: Incoming[];
+  if ((req.headers.get("content-type") ?? "").includes("application/json")) {
+    const body = (await req.json()) as { sessionId?: string; blobs?: { name: string; url: string; size: number }[] };
+    sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+    files = (body.blobs ?? []).map((b) => ({
+      name: b.name, size: b.size, blobUrl: b.url,
+      bytes: async () => { const buf = await getBlobBuffer(b.url); if (!buf) throw new Error("stored file not readable"); return buf; },
+    }));
+    // A reference must point inside this session's folder; anything else
+    // could read another session's blob through this route.
+    if (files.some((f) => !f.blobUrl || !f.blobUrl.includes(`/sessions/${sessionId}/`))) {
+      return NextResponse.json({ error: "A stored file does not belong to this session." }, { status: 400 });
+    }
+  } else {
+    const form = await req.formData();
+    const sid = form.get("sessionId");
+    sessionId = typeof sid === "string" ? sid : "";
+    files = form.getAll("files").filter((f): f is File => f instanceof File).map((f) => ({ name: f.name, size: f.size, bytes: async () => Buffer.from(await f.arrayBuffer()) }));
+  }
+  if (!sessionId) {
     return NextResponse.json({ error: "Missing sessionId" }, { status: 400 });
   }
-
-  const files = form.getAll("files").filter((f): f is File => f instanceof File);
   if (files.length === 0) {
     return NextResponse.json({ error: "No files provided" }, { status: 400 });
   }
@@ -61,7 +86,7 @@ export async function POST(req: NextRequest) {
     }
 
     try {
-      const buffer = Buffer.from(await file.arrayBuffer());
+      const buffer = await file.bytes();
       const isXlsx = ext === ".xlsx" || ext === ".xls";
       const parsedSheets = isXlsx ? parseXLSXBuffer(buffer) : [{ sheetName: "", ...parseCSVBuffer(buffer) }];
 
@@ -70,7 +95,8 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
-      const blobUrl = await uploadFile(
+      // Already stored by the browser? Reuse it; otherwise store the bytes now.
+      const blobUrl = file.blobUrl ?? await uploadFile(
         `sessions/${sessionId}/${Date.now()}-${file.name}`,
         buffer,
         isXlsx ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : "text/csv"

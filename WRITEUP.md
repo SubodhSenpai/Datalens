@@ -39,4 +39,4 @@ Graded strictly: **cross-file 51 / 60 = 85 %** (95 % counting defensible reading
 4. **Data-contract defaults** — quality-flag and unit policies applied on load, with an opt-out.
 5. **Follow-up context** — carry the previous plan into "now only for June".
 6. **A compiler symbol table** — resolve column identity once, not by name at each stage.
-7. **Hardening for real users** — today a session id is the only credential and there is no rate limit or cleanup. Next: cryptographically random session ids, per-user accounts so a session belongs to someone, rate limits on upload and query, and timed deletion of abandoned blobs.
+7. **Hardening for real users** — today a session id is the only credential and there is no rate limit; abandoned files are removed by a daily cron. Next: cryptographically random session ids, per-user accounts so a session belongs to someone, and rate limits on upload and query.

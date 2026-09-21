@@ -1,4 +1,4 @@
-import { put, del, get, BlobPreconditionFailedError } from "@vercel/blob";
+import { put, del, get, list, BlobPreconditionFailedError } from "@vercel/blob";
 
 // Falls back to an in-memory store when BLOB_READ_WRITE_TOKEN isn't configured
 // (e.g. local dev without `vercel env pull`), so upload/query still work end
@@ -6,6 +6,7 @@ import { put, del, get, BlobPreconditionFailedError } from "@vercel/blob";
 // token set, this transparently uses real Blob storage per Figure 2.
 
 const hasBlobToken = !!process.env.BLOB_READ_WRITE_TOKEN;
+export const hasBlobStorage = hasBlobToken;
 
 // Kept on globalThis so it survives Next.js dev hot-reloads. A plain module
 // constant is recreated empty every time this file (or an import of it) is
@@ -150,4 +151,25 @@ export async function deleteBlobPath(pathname: string): Promise<void> {
   if (hasBlobToken) {
     await del(pathname);
   }
+}
+
+export interface StoredBlob { url: string; pathname: string; size: number; uploadedAt: Date }
+
+/** Every blob under a prefix, following pagination. The local fallback has no timestamps, so it lists nothing. */
+export async function listBlobs(prefix: string): Promise<StoredBlob[]> {
+  if (!hasBlobToken) return [];
+  const out: StoredBlob[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await list({ prefix, cursor, limit: 1000 });
+    out.push(...page.blobs);
+    cursor = page.hasMore ? page.cursor : undefined;
+  } while (cursor);
+  return out;
+}
+
+/** Delete many blobs; the API takes batches, so chunk. */
+export async function deleteFiles(urls: string[]): Promise<void> {
+  if (!hasBlobToken) return;
+  for (let i = 0; i < urls.length; i += 100) await del(urls.slice(i, i + 100));
 }

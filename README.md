@@ -35,8 +35,9 @@ Try it: upload the four files in `test-data/validation-v2/` and ask *Total invoi
 | `GEMINI_API_KEY` | one key required | https://aistudio.google.com/apikey |
 | `BLOB_READ_WRITE_TOKEN` | hosted only | Vercel Blob token |
 | `NEXT_PUBLIC_BLOB_CLIENT_UPLOADS` | hosted only | `1` — browser uploads straight to Blob (serverless request cap ≈ 4.5 MB) |
+| `CRON_SECRET` | hosted only | any long random string — authorises the daily cleanup cron |
 
-Optional: `LLM_PROVIDER`, `OPENROUTER_MODEL`, `GEMINI_MODEL`, `PLAN_CONSENSUS` — see `.env.example`.
+Optional: `LLM_PROVIDER`, `OPENROUTER_MODEL`, `GEMINI_MODEL`, `PLAN_CONSENSUS`, `SESSION_TTL_HOURS` — see `.env.example`.
 
 ## Validation
 
@@ -92,7 +93,7 @@ SET=validation TIERS=2 ONLY=2.1,2.3 npx tsx scripts/run-tier2-v2.ts
 - **Model plans, never computes.** With no reachable model the app says so — there is no keyword fallback. A question the plan language cannot express gets a simpler answer, stated as such.
 - **Plan language.** Single-block plans: no chained sub-queries, window functions, pivots, date buckets matched to period labels in another file, or binned histograms. One question at a time — no conversational memory.
 - **Serverless.** Nothing persists between requests; each question re-reads the session's files from Blob. Requests and responses are capped at ≈ 4.5 MB (large uploads go browser → Blob; answers returning tens of thousands of raw rows can exceed it). 60 s per call.
-- **Sessions.** Isolation is a random session id, no accounts; blobs are private. Files persist until a dataset is deleted — no timed cleanup.
+- **Sessions.** Isolation is a random session id, no accounts; blobs are private. A session expires 2 h after its last upload or removal, and a daily cron (`vercel.json` → `/api/cleanup`) deletes the files of sessions idle for 24 h (`SESSION_TTL_HOURS`). A refresh starts a new session — nothing is restored.
 - **Data.** CSV / XLSX / XLS, one table per sheet, header within the first 15 rows; 25 files × 25 MB, 100 MB per session.
 - **Heuristics.** Key inference, sentinel detection and spelling unification use thresholds (≥ 90 % unique, all-nines value > 3× outside the spread, ≤ 50 distinct values). Unusual data can be misjudged, which is why every intervention is shown on the file card.
 
@@ -100,7 +101,7 @@ SET=validation TIERS=2 ONLY=2.1,2.3 npx tsx scripts/run-tier2-v2.ts
 
 ```
 src/lib/        parse & clean → relationships → semantic model → planner → compiler → validator → answer-check → engine
-src/app/api/    upload, upload/blob, query, dataset
+src/app/api/    upload, upload/blob, query, dataset, cleanup (daily cron)
 src/components/ UI
 scripts/        data generators and test suites
 test-data/      validation sets with answer keys

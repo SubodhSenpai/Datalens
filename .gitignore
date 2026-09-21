@@ -48,3 +48,7 @@ test-data/**/reliability-report.json
 test-data/csv/
 test-data/xlsx/
 test-data/test-scenarios.xlsx
+
+# Next.js dev server regenerates these agent-rule files on every start
+AGENTS.md
+CLAUDE.md

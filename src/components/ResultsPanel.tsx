@@ -67,6 +67,14 @@ export default function ResultsPanel({ result, isActive, onClick, onFollowUp }: 
               <Loader2 size={10} className="animate-spin" /> Running
             </span>
           )}
+          {result.mode === "rag" && (
+            <span
+              className="badge badge-amber text-[11px]"
+              title={`Answered by the model from retrieved rows and column statistics — not computed by the query engine.${result.confidence ? ` Model confidence: ${result.confidence}.` : ""}`}
+            >
+              RAG · unverified{result.confidence ? ` · ${result.confidence}` : ""}
+            </span>
+          )}
           {result.status === "success" && <span className="badge badge-emerald text-[11px]">Done</span>}
           {result.status === "error"   && <span className="badge badge-red text-[11px]">Error</span>}
 

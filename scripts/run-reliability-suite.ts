@@ -16,7 +16,7 @@ import * as XLSX from "xlsx";
 // is cosmetic. What must be right is the NUMBER and the BREAKDOWN.
 
 const BASE_URL = "http://localhost:3000";
-const TEST_DATA = path.resolve(__dirname, "..", "..", "test-data");
+const TEST_DATA = path.resolve(__dirname, "..", "test-data");
 const RUNS_PER_QUESTION = Number(process.env.RUNS ?? 3);
 const TOLERANCE = 0.01; // 1% — guards float/rounding drift, not wrong math
 

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { DatasetFile, MAX_FILES, MAX_FILE_SIZE_MB, MAX_SESSION_SIZE_MB, SUPPORTED_FORMATS } from "@/lib/types";
+import { DatasetFile, DatasetLink, MAX_FILES, MAX_FILE_SIZE_MB, MAX_SESSION_SIZE_MB, SUPPORTED_FORMATS } from "@/lib/types";
 import { parseCSVBuffer, parseXLSXBuffer } from "@/lib/parse";
 import { uploadFile } from "@/lib/blob";
 import { getOrCreateSession, getSessionTotalSize, addDatasets, DatasetRecord } from "@/lib/session-store";
@@ -108,6 +108,8 @@ export async function POST(req: NextRequest) {
           columns: record.columns,
           blobUrl: record.blobUrl,
           status: "ready",
+          sheetName: record.sheetName,
+          notes: record.notes,
         });
       }
     } catch {
@@ -115,9 +117,15 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // The links are returned with the upload so the UI can tell the user how
+  // the files fit together before any question is asked.
+  let links: DatasetLink[] = [];
   if (newRecords.length > 0) {
-    await addDatasets(sessionId, newRecords, detectRelationships);
+    const session = await addDatasets(sessionId, newRecords, detectRelationships);
+    links = session.relationships.map((r) => ({
+      datasetIdA: r.datasetIdA, datasetIdB: r.datasetIdB, columnA: r.columnA, columnB: r.columnB, cardinality: r.cardinality,
+    }));
   }
 
-  return NextResponse.json({ datasets: created, errors }, { status: created.length > 0 ? 200 : 400 });
+  return NextResponse.json({ datasets: created, errors, links }, { status: created.length > 0 ? 200 : 400 });
 }

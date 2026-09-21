@@ -1,10 +1,11 @@
 import OpenAI from "openai";
-import { AggregateFn, ColumnSchema, FilterOp, QueryPlan } from "./types";
+import { AggregateFn, ChartType, ColumnSchema, FilterOp, QueryPlan } from "./types";
 import { RelationshipRecord } from "./session-store";
 import { joinPrefix } from "./query-engine";
 import { AmbiguityWarning } from "./data-dictionary";
 import { SchemaLink } from "./schema-linking";
 import { SemanticModel, renderSemanticMenu } from "./semantic-model";
+import { PROVIDERS, PROVIDER_ORDER, ProviderId, detectProvider } from "./providers";
 import { Selection, looksLikeSelection } from "./compile-selection";
 
 export interface DatasetSchemaContext {
@@ -65,28 +66,16 @@ export class PlannerUnavailableError extends Error {
   }
 }
 
-// Open-source models served via OpenRouter (OpenAI-compatible API), per the
-// assignment's "use open-source AI models" constraint. The primary model is
-// configurable (OPENROUTER_MODEL) — a fully-free ":free" model sits on a
-// shared, congested pool and can be rate-limited or out of capacity at any
-// moment. Rather than let that take the planner down to the heuristic
-// fallback (accurate but far weaker), each free-tier candidate below is
-// tried in order before giving up.
-const MODEL = process.env.OPENROUTER_MODEL ?? "qwen/qwen-2.5-7b-instruct";
-// Free-tier only (no paid model is ever called). Note that OpenRouter's
-// per-day free quota is per ACCOUNT, shared by every ":free" model, so a
-// longer chain helps with a congested or delisted model, not with a spent
-// daily cap — more API keys do.
-const FALLBACK_MODELS = [
-  "google/gemma-4-31b-it:free",
-  "z-ai/glm-5.2:free",
-  "nvidia/nemotron-3-super-120b-a12b:free",
-  "google/gemma-4-26b-a4b-it:free",
-  "nvidia/nemotron-3-ultra-550b-a55b:free",
-  "nex-agi/nex-n2.5-pro:free",
-  "thinkingmachines/inkling:free",
-].filter((m) => m !== MODEL);
-const MODEL_CHAIN = [MODEL, ...FALLBACK_MODELS];
+// Models are per provider (see providers.ts). OPENROUTER_MODEL / GEMINI_MODEL
+// put one model at the front of that provider's chain; the rest follow as
+// fallbacks. The assignment's "open-source models" constraint is met by the
+// OpenRouter chain (free open-weight models only); Gemini is an optional,
+// user-supplied alternative.
+function modelChain(provider: ProviderId): string[] {
+  const override = provider === "openrouter" ? process.env.OPENROUTER_MODEL : process.env.GEMINI_MODEL;
+  const base = PROVIDERS[provider].models;
+  return override ? [override, ...base.filter((m) => m !== override)] : base;
+}
 
 // OpenRouter's free-tier rate limits are tracked per API key — a second
 // (or third, ...) key under OPENROUTER_API_KEY2, OPENROUTER_API_KEY3, ...
@@ -98,18 +87,45 @@ const MODEL_CHAIN = [MODEL, ...FALLBACK_MODELS];
 // their own) passes `userApiKey` — sent by the client per-request, never
 // persisted server-side — which is used EXCLUSIVELY instead of any env keys,
 // so it's unambiguous whose credits/rate limits a query is spending.
-function getClients(userApiKey?: string): OpenAI[] {
-  if (userApiKey) return [new OpenAI({ apiKey: userApiKey, baseURL: "https://openrouter.ai/api/v1" })];
+export interface LlmClient { client: OpenAI; provider: ProviderId }
 
-  const keys = [process.env.OPENROUTER_API_KEY];
+function makeClient(apiKey: string, provider: ProviderId): LlmClient {
+  // No SDK-level retries: the chain below decides what to do with a 429 or
+  // 503 (skip the model for a while, move on) — the SDK's own two silent
+  // retries with backoff were eating the whole chain budget on one model.
+  return { client: new OpenAI({ apiKey, baseURL: PROVIDERS[provider].baseURL, maxRetries: 0, timeout: REQUEST_TIMEOUT_MS }), provider };
+}
+
+function envKeys(prefix: string): string[] {
+  const keys = [process.env[prefix]];
   for (let i = 2; ; i++) {
-    const key = process.env[`OPENROUTER_API_KEY${i}`];
+    const key = process.env[`${prefix}${i}`];
     if (!key) break;
     keys.push(key);
   }
-  return keys
-    .filter((k): k is string => Boolean(k))
-    .map((apiKey) => new OpenAI({ apiKey, baseURL: "https://openrouter.ai/api/v1" }));
+  return keys.filter((k): k is string => Boolean(k));
+}
+
+/**
+ * The clients a call may use, in provider order. A user-supplied key is
+ * used exclusively, under the provider its shape identifies. Server keys:
+ * GEMINI_API_KEY[n] and OPENROUTER_API_KEY[n]; LLM_PROVIDER=openrouter
+ * puts OpenRouter first when both kinds are configured.
+ */
+function getClients(userApiKey?: string): LlmClient[] {
+  if (userApiKey) return [makeClient(userApiKey, detectProvider(userApiKey).id)];
+  const preferred = process.env.LLM_PROVIDER === "openrouter" ? "openrouter" : undefined;
+  const order: ProviderId[] = preferred ? [preferred, ...PROVIDER_ORDER.filter((p) => p !== preferred)] : PROVIDER_ORDER;
+  const out: LlmClient[] = [];
+  for (const provider of order) {
+    for (const key of envKeys(provider === "gemini" ? "GEMINI_API_KEY" : "OPENROUTER_API_KEY")) out.push(makeClient(key, provider));
+  }
+  return out;
+}
+
+/** Which providers the server has keys for — shown in the UI so the user knows what answers. */
+export function configuredProviders(): ProviderId[] {
+  return getClients().map((c) => c.provider).filter((p, i, a) => a.indexOf(p) === i);
 }
 
 // Not all OpenRouter-hosted providers support strict `response_format:
@@ -142,7 +158,10 @@ const CONGESTED_TTL_MS = 90 * 1000;
 // Wall-clock budget for one planner call across the whole model/key chain.
 // Without it, 4 keys × 4 models × backoff retries turned a single question
 // into a five-minute wait that the client gave up on.
-const CHAIN_BUDGET_MS = 60 * 1000;
+const CHAIN_BUDGET_MS = 100 * 1000;
+// One request that hangs is treated like congestion: give up on it and let
+// the chain try the next model, well inside the chain budget.
+const REQUEST_TIMEOUT_MS = 45 * 1000;
 const exhaustedUntil = new Map<string, number>();
 const exhaustedKey = (model: string, client: OpenAI) => `${model}|${client.apiKey.slice(-8)}`;
 
@@ -151,22 +170,26 @@ const exhaustedKey = (model: string, client: OpenAI) => `${model}|${client.apiKe
 // past a 429 on the model you actually asked for) before dropping down to
 // a different fallback model at all.
 async function completeJson(
-  clients: OpenAI[],
+  clients: LlmClient[],
   system: string,
   userMessage: string,
   maxTokens: number
 ): Promise<{ text: string; model: string; finishReason?: string }> {
   let lastErr: unknown;
   const deadline = Date.now() + CHAIN_BUDGET_MS;
-  for (const model of MODEL_CHAIN) {
-    for (const client of clients) {
+  const providers = clients.map((c) => c.provider).filter((p, i, a) => a.indexOf(p) === i);
+  for (const provider of providers) {
+    const cfg = PROVIDERS[provider];
+    for (const model of modelChain(provider)) {
+      for (const { client } of clients.filter((c) => c.provider === provider)) {
       if (Date.now() > deadline) throw lastErr ?? new Error("Planner time budget exhausted before any model answered.");
       const k = exhaustedKey(model, client);
       const until = exhaustedUntil.get(k);
       if (until && until > Date.now()) continue;
       try {
-        const { text, finishReason } = await completeJsonWithModel(client, model, system, userMessage, maxTokens);
-        return { text, model, finishReason };
+        // The provider's own output budget when it is larger (reasoning models count thinking inside it).
+        const { text, finishReason } = await completeJsonWithModel(client, model, system, userMessage, Math.max(maxTokens, cfg.maxTokens), cfg.extraBody);
+        return { text, model: `${cfg.label}: ${model}`, finishReason };
       } catch (err) {
         lastErr = err;
         if (isDailyCap(err) || isModelUnavailable(err)) exhaustedUntil.set(k, Date.now() + EXHAUSTED_TTL_MS);
@@ -178,6 +201,7 @@ async function completeJson(
         if (!isRateLimited(err) && !isCapacityError(err) && !isModelUnavailable(err)) throw err;
         console.error(`completeJson: "${model}" unavailable (${err instanceof Error ? err.message : err}), trying next option.`);
       }
+      }
     }
   }
   throw lastErr;
@@ -188,12 +212,12 @@ async function completeJson(
 // not to the request, so the chain moves on rather than giving up.
 function isModelUnavailable(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /404|unavailable|no endpoints|not found/i.test(msg);
+  return /404|unavailable for free|no longer available|no endpoints|not found/i.test(msg);
 }
 
 function isCapacityError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /402|insufficient credits|no.*instances|not available/i.test(msg);
+  return /402|503|insufficient credits|no.*instances|not available|high demand|overloaded|UNAVAILABLE/i.test(msg);
 }
 
 interface Completion {
@@ -202,7 +226,7 @@ interface Completion {
   finishReason?: string;
 }
 
-async function completeJsonWithModel(client: OpenAI, model: string, system: string, userMessage: string, maxTokens: number): Promise<Completion> {
+async function completeJsonWithModel(client: OpenAI, model: string, system: string, userMessage: string, maxTokens: number, extraBody: Record<string, unknown>): Promise<Completion> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= RATE_LIMIT_RETRIES; attempt++) {
     if (attempt > 0) await new Promise((r) => setTimeout(r, RATE_LIMIT_BACKOFF_MS * attempt));
@@ -216,15 +240,10 @@ async function completeJsonWithModel(client: OpenAI, model: string, system: stri
         // same join question sometimes used leftOn/rightOn correctly,
         // sometimes didn't), so pin to near-deterministic.
         temperature: 0,
-        // Some free-tier models (e.g. Qwen's ":free" variant) default to an
-        // internal "thinking" pass that eats the whole max_tokens budget as
-        // reasoning tokens, leaving finish_reason "length" and an EMPTY
-        // content field — a silent failure that looks like the model just
-        // didn't answer. Turning reasoning off (where the provider supports
-        // it) makes it answer directly instead. Not in the openai SDK's
-        // types, so it's passed through as a plain extra body field;
-        // providers that ignore it just fall back to default behavior.
-        ...( { reasoning: { enabled: false } } as object),
+        // Provider-specific reasoning controls (see providers.ts). Not in
+        // the openai SDK's types, so passed through as plain body fields;
+        // a provider that ignores them falls back to its default.
+        ...(extraBody as object),
         messages: [
           { role: "system", content: system },
           { role: "user", content: userMessage },
@@ -375,13 +394,13 @@ export async function planQuery(
 
 type QueryPlan = {
   datasetId: string;            // the NAME of the base dataset, copied EXACTLY as it appears in the "dataset" field of the list below, including any sheet suffix (e.g. "finance.xlsx — Q1"). Never invent a name, and never use a name that isn't in the list. The base dataset MUST be the one that actually contains the main number the question asks for — if the question asks for a total of some column, the base is the dataset holding that column, not a different dataset that merely relates to it.
-  joins?: { datasetId: string; on?: string; leftOn?: string; rightOn?: string; type?: "inner"|"left" }[]; // datasetId here is also the joined dataset's NAME, copied exactly. Use when the question needs data from more than one dataset. Use "on" ONLY when both datasets name the join column identically. If a relationship below has different columnA/columnB names (e.g. matched by value overlap, not name), you MUST use leftOn (the base dataset's column name) + rightOn (the joined dataset's column name) instead — do not invent a column name that doesn't exist in one of the datasets, that silently produces garbage results. A question can need data from a THIRD dataset that has no direct relationship to the base — e.g. base is a readings table with only a sensor id, and the question wants a "site name" that lives in a sites table connected only through a sensors table. In that case list BOTH joins: one from the base to the intermediate dataset, then one from the intermediate dataset's key to the third dataset (leftOn/rightOn can reference a column that only exists after the FIRST join has been applied).
+  joins?: { datasetId: string; on?: string; leftOn?: string; rightOn?: string; type?: "inner"|"left" }[]; // datasetId here is also the joined dataset's NAME, copied exactly. Use when the question needs data from more than one dataset. Use "on" ONLY when both datasets name the join column identically. If a relationship below has different columnA/columnB names (e.g. matched by value overlap, not name), you MUST use leftOn (the base dataset's column name) + rightOn (the joined dataset's column name) instead — do not invent a column name that doesn't exist in one of the datasets, that silently produces garbage results. A question can need data from a THIRD dataset that has no direct relationship to the base — e.g. base is a bookings table with only a room id, and the question wants a "hotel name" that lives in a hotels table connected only through a rooms table. In that case list BOTH joins: one from the base to the intermediate dataset, then one from the intermediate dataset's key to the third dataset (leftOn/rightOn can reference a column that only exists after the FIRST join has been applied).
   derive?: { as: string; expr: string }[]; // computed row-level columns, evaluated before filters/groupBy/aggregations. expr is ARITHMETIC ONLY over existing numeric column names: + - * / ( ) and number literals — no functions, no strings. Use this whenever the question needs a value that isn't already a literal column but is a straightforward formula over ones that exist — a total built from a count column times a per-unit column, a net figure built from a gross column minus a deduction column, and so on. Never invent a number outside this expression grammar.
   select?: string[];            // columns to include in the output, omit for all
   filters?: { column: string; op: "eq"|"neq"|"gt"|"gte"|"lt"|"lte"|"contains"; value: string|number|boolean }[];
   dateBucket?: { column: string; granularity: "day"|"month"|"year"; as?: string }; // use for trend/time-series questions to bucket a date column before grouping
   groupBy?: string[];
-  aggregations?: { column: string; fn: "sum"|"avg"|"count"|"countDistinct"|"min"|"max"; as?: string }[]; // "count" counts ROWS; "countDistinct" counts unique values of the column and works on text columns too. When a table has several rows per entity (one row per employee per month/cycle), "how many employees" means countDistinct on the id column — plain count would report the row count instead, which is a different and wrong number.
+  aggregations?: { column: string; fn: "sum"|"avg"|"median"|"count"|"countDistinct"|"min"|"max"; as?: string }[]; // "count" on a column counts the cells that hold a value (blanks are skipped; use column "*" to count rows); "countDistinct" counts unique values of the column and works on text columns too. When a table has several rows per entity (one row per employee per month/cycle), "how many employees" means countDistinct on the id column — plain count would report the row count instead, which is a different and wrong number.
   having?: { column: string; op: "eq"|"neq"|"gt"|"gte"|"lt"|"lte"|"contains"; value: string|number|boolean }[]; // filters applied AFTER grouping, against the aggregate results (SQL HAVING). "column" must be an aggregation's "as" name or a groupBy column — never a raw source column.
   correlate?: { columnX: string; columnY: string }; // set this whenever the question asks about correlation / relationship strength between two numeric columns — this computes an actual Pearson coefficient, which a chart alone cannot do
   sort?: { column: string; direction: "asc"|"desc" }[];
@@ -396,8 +415,8 @@ A question comparing multiple values of the SAME column ("open vs closed", "dome
 
 Only reference columns that exist in the given schema. After a join, a joined-in column keeps its original name unless a column of that name already exists, in which case it is renamed to that dataset's "prefixWhenJoined" value + "_" + the column name (the prefix is given per dataset above — use it exactly; it is NOT the file name). So if two files each have "amount" and the second is joined in, the base's stays "amount" and the joined one becomes e.g. "refunds_amount". Pick sensible defaults: totals/averages/counts always need an "aggregations" entry (never leave a "total"/"average" question as an unaggregated row dump); "by <dimension>" or "each <dimension>" implies groupBy; "top/bottom N" implies sort+limit; chartType "none" only for a single scalar answer. Chart choice: bar for comparing a handful of categories, dot instead of bar when there are more than ~12 categories, line for trends over time, area for cumulative/running totals over time, pie for a proportion breakdown of 5 or fewer categories, treemap for a proportion breakdown of 6+ categories, histogram for the distribution of one numeric column, scatter for the relationship between two numeric columns (pair with "correlate"), radar for comparing several metrics across a few entities, heatmap for a value across two categorical dimensions at once.
 
-For a trend/time-series question, you MUST bucket the date column with dateBucket before grouping by it — never groupBy a raw date column directly, since every row has a distinct timestamp and that produces one group per row instead of a real trend. Example: question "show the monthly usage trend", dataset has date column "reading_taken_at" and numeric column "kwh":
-{"datasetId":"meter_readings.csv","dateBucket":{"column":"reading_taken_at","granularity":"month","as":"reading_month"},"groupBy":["reading_month"],"aggregations":[{"column":"kwh","fn":"sum","as":"total_kwh"}],"sort":[{"column":"reading_month","direction":"asc"}],"chartType":"line","chartX":"reading_month","chartY":["total_kwh"]}
+For a trend/time-series question, you MUST bucket the date column with dateBucket before grouping by it — never groupBy a raw date column directly, since every row has a distinct timestamp and that produces one group per row instead of a real trend. Example: question "show the monthly usage trend", dataset has date column "billed_at" and numeric column "kwh":
+{"datasetId":"utility_bills.csv","dateBucket":{"column":"billed_at","granularity":"month","as":"bill_month"},"groupBy":["bill_month"],"aggregations":[{"column":"kwh","fn":"sum","as":"total_kwh"}],"sort":[{"column":"bill_month","direction":"asc"}],"chartType":"line","chartX":"bill_month","chartY":["total_kwh"]}
 
 "Top/bottom N" questions come in two different shapes — do not confuse them:
 1. "Top N <rows> by <column>" (the rows themselves are already what's being ranked, e.g. "top 10 books by page count") needs ONLY select+sort+limit — no "aggregations" and no "groupBy" at all, since there is nothing to summarize, just rows to rank and truncate: {"datasetId":"library.csv","select":["title","page_count"],"sort":[{"column":"page_count","direction":"desc"}],"limit":10,"chartType":"bar","chartX":"title","chartY":["page_count"]}
@@ -413,8 +432,8 @@ A question about entities that meet a condition ACROSS several of their rows —
 
 For a cross-dataset question, check the Relationships list below first — each entry gives columnA (in datasetIdA) and columnB (in datasetIdB) plus how it was detected ("name" = identical column names; "value-overlap" = the column names differ but their actual values substantially overlap, e.g. a "country" column and a "nation" column both containing the same country names). Only join on a relationship that's actually listed; if no relationship connects the datasets you need, say so in "reasoning" and answer from the single dataset you can, rather than guessing a join key.
 
-Three-dataset example — this pattern applies whenever the value you need to group by lives TWO joins away from the base dataset, regardless of what the datasets are actually called: base "readings" (columns reading_id, temperature, sensor_id) needs to be broken down by "site name", which only exists in "sites" (site_id, site_name) — and readings has no site_id at all, only "sensors" (sensor_id, site_id) connects the two:
-{"datasetId":"readings.csv","joins":[{"datasetId":"sensors.csv","on":"sensor_id"},{"datasetId":"sites.csv","on":"site_id"}],"groupBy":["site_name"],"aggregations":[{"column":"temperature","fn":"avg","as":"avg_temperature"}],"chartType":"bar","chartX":"site_name","chartY":["avg_temperature"]}
+Three-dataset example — this pattern applies whenever the value you need to group by lives TWO joins away from the base dataset, regardless of what the datasets are actually called: base "bookings" (columns booking_id, nightly_rate, room_id) needs to be broken down by "hotel name", which only exists in "hotels" (hotel_id, hotel_name) — and bookings has no hotel_id at all, only "rooms" (room_id, hotel_id) connects the two:
+{"datasetId":"bookings.csv","joins":[{"datasetId":"rooms.csv","on":"room_id"},{"datasetId":"hotels.csv","on":"hotel_id"}],"groupBy":["hotel_name"],"aggregations":[{"column":"nightly_rate","fn":"avg","as":"avg_nightly_rate"}],"chartType":"bar","chartX":"hotel_name","chartY":["avg_nightly_rate"]}
 Do NOT join a dataset that the question doesn't actually need data from, even if a relationship to it exists — an extra join multiplies every row (and every sum) by however many matching rows it adds. Only include a join whose columns you will actually filter/groupBy/aggregate/select/chart by.
 
 Each relationship also carries a "cardinality". "1:N" means datasetA holds each key value once while datasetB repeats it; "N:1" is the reverse; "1:1" means both sides hold it once; "N:M" means neither does. Joining an N:M pair produces every combination of matching rows, which multiplies the data and inflates any total taken over it — only do that if the question genuinely asks about the combinations. When a one-side is joined to a many-side, each of the one-side's rows is duplicated, so a sum/average/count over one of ITS OWN columns afterwards counts the same value repeatedly: pick as "datasetId" the dataset that actually holds the number being aggregated, and join outwards from it.
@@ -469,12 +488,12 @@ export type PlannerOutput =
 const SELECTION_SYSTEM = `You are a query planner for a tabular data analysis tool. You are given a MENU of measures and dimensions across the uploaded files (each written as alias.column), the relationships between files, and a question. Output ONLY a JSON object (no markdown, no prose) matching this TypeScript type:
 
 type Selection = {
-  measures?: { ref: string; fn: "sum"|"avg"|"count"|"countDistinct"|"min"|"max"; as?: string }[]; // what to compute. ref is copied EXACTLY from the menu (alias.column) or is the "as" name of a derive below. "count" counts rows; "countDistinct" counts distinct values and works on any column — "how many members" over a table with one row per loan is countDistinct on the member id.
+  measures?: { ref: string; fn: "sum"|"avg"|"median"|"count"|"countDistinct"|"min"|"max"; as?: string; where?: { ref: string; op: string; value?: string|number; valueRef?: string }[] }[]; // what to compute. "where" restricts ONE measure to matching rows, so a count of qualifying rows can sit beside the plain count (a share = qualifying / all via "derive" on the two "as" names), and two measures of the same field can differ only by condition ("value where parameter is A" beside "value where parameter is B", grouped by place and time, then correlated). ref is copied EXACTLY from the menu (alias.column) or is the "as" name of a derive below. "count" counts the cells of that field that hold a value (blanks skipped); "countDistinct" counts distinct values and works on any column — "how many members" over a table with one row per loan is countDistinct on the member id.
   dimensions?: string[];        // refs to group by — "by industry" / "per team" / "for each plan". Omit for a single overall figure.
-  filters?: { ref: string; op: "eq"|"neq"|"gt"|"gte"|"lt"|"lte"|"contains"|"in"|"notIn"|"isNull"|"isNotNull"; value?: string|number|boolean|(string|number)[] }[]; // row filters. "in" takes a list — "returned or lost" is ONE filter: { ref, op: "in", value: ["Returned","Lost"] }; use the exact values listed in the menu. isNull matches blank cells (e.g. a return date that is empty = not yet returned).
+  filters?: { ref: string; op: "eq"|"neq"|"gt"|"gte"|"lt"|"lte"|"contains"|"in"|"notIn"|"isNull"|"isNotNull"; value?: string|number|boolean|(string|number)[]; valueRef?: string }[]; // row filters. "in" takes a list. valueRef compares with ANOTHER field of the same row instead of a constant: "departments whose spend exceeds their budget" → {"ref":"spend.amount","op":"gt","valueRef":"budgets.limit"} (both tables are joined for you) — "returned or lost" is ONE filter: { ref, op: "in", value: ["Returned","Lost"] }; use the exact values listed in the menu. isNull matches blank cells (e.g. a return date that is empty = not yet returned).
   derive?: { as: string; expr: string }[]; // a quantity that is not a column but a plain formula over menu refs: "alias.units_used * alias.rate_per_unit", "alias.gross * (1 - alias.deduction_pct / 100)". Arithmetic only. Then aggregate it via measures with ref = its "as".
   dateBucket?: { ref: string; granularity: "day"|"month"|"year"; as?: string }; // for trends over time; the "as" name is grouped by automatically.
-  having?: { column: string; op: "eq"|"neq"|"gt"|"gte"|"lt"|"lte"; value: string|number }[]; // conditions on measure "as" names AFTER grouping (entities meeting a condition across several rows: "in every period", "in all three semesters").
+  having?: { column: string; op: "eq"|"neq"|"gt"|"gte"|"lt"|"lte"; value?: string|number; valueRef?: string }[]; // conditions on measure "as" names AFTER grouping; valueRef compares two measures ("branches whose spend reached their budget": measures spend and budget, having {"column":"spend","op":"gte","valueRef":"budget"}) (entities meeting a condition across several rows: "in every period", "in all three semesters").
   without?: string[];           // table ALIASES the rows must have NO match in — "branches with no loans" = select branch fields, without: ["<loans alias>"].
   select?: string[];            // refs to list, for a row listing (no measures). "top N rows by X" = select + sort + limit.
   sort?: { column: string; direction: "asc"|"desc" }[]; // column is a measure "as" name, a dimension column name, or a selected column name. "most/highest/slowest/largest" = desc; "least/lowest/fastest/smallest" = asc.
@@ -571,6 +590,88 @@ export async function planSelection(
   }
 }
 
+// ─── RAG mode: answer directly from retrieved context ──────────────────────
+
+export interface RagAnswer {
+  answerType?: "number" | "list" | "table" | "boolean" | "text";
+  evidence?: string[];
+  answer: string;
+  table?: { columns: string[]; rows: (string | number | null)[][] };
+  chartType?: ChartType;
+  chartX?: string;
+  chartY?: string[];
+  confidence?: "high" | "medium" | "low";
+  followUpSuggestions?: string[];
+}
+
+const RAG_SYSTEM = `You answer a business user's question about their uploaded spreadsheet files (CSV/XLSX) using ONLY the context provided. The context has, in order of reliability:
+1. every file's columns with whole-file statistics (count, sum, mean, min, max, distinct values);
+2. "Exact facts computed for the matching rows" — counts, sums, means and per-category breakdowns computed over the FULL data for the rows the question's words select (these are exact — copy them);
+3. rows: either ALL rows of a small matching subset, or a selection of best-matching rows (a selection is NOT the whole data — never total or count a selection as if it were everything).
+
+Rules:
+- Prefer an exact computed fact over anything you would work out yourself; prefer whole-file statistics for whole-file questions; use rows only for specifics about those rows.
+- When a file's header says an id column repeats (duplicate records) and a count shows "(N distinct <id>)", the number of entities is N, not the row count — report N.
+- Copy numbers exactly as they appear. If you must compute (a difference, a ratio), show the arithmetic from numbers in the context, e.g. "1,240 − 980 = 260".
+- If the context does not contain what is needed, say precisely what is missing and set "confidence" to "low". Never invent a number, a name or a row.
+- Files linked by a key (listed under "Key links") can be combined by matching that key; the computed facts already do this where they say "selected through the key link".
+- Decide the answer type first, list the evidence you will use, then write the answer.
+
+Example (a different, unrelated data set). Question: "How many overdue loans does the Riverside branch have, and what is their total fine?"
+Context contains: value "Riverside" in branches.csv.branch_name (1 row); loans.csv: 37 of 2,410 rows where branch_id matches branches.csv rows where branch_name is "Riverside"; by status: returned=29, overdue=8; fine_amount: n=37, sum=214.50 ...; and the 8 overdue rows listed with fine_amount values 12.00, 30.00, 8.50, 45.00, 22.00, 15.00, 9.00, 18.00.
+Good output:
+{"answerType":"number","evidence":["loans.csv subset for Riverside: by status overdue=8","the 8 overdue rows' fine_amount values"],"answer":"The Riverside branch has 8 overdue loans. Their fines total 12.00 + 30.00 + 8.50 + 45.00 + 22.00 + 15.00 + 9.00 + 18.00 = 159.50 (the 214.50 sum in the facts covers all 37 Riverside loans, not only the overdue ones).","table":{"columns":["loan_id","fine_amount"],"rows":[["L1042",12],["L1077",30],["L1090",8.5],["L1101",45],["L1133",22],["L1150",15],["L1162",9],["L1188",18]]},"chartType":"none","chartX":null,"chartY":null,"confidence":"high","followUpSuggestions":["Which members hold the overdue Riverside loans?","How does Riverside's overdue count compare with other branches?"]}
+
+Output ONLY a JSON object with exactly these fields:
+{
+  "answerType": "number"|"list"|"table"|"boolean"|"text",
+  "evidence": string[],             // which facts / statistics / rows from the context you used
+  "answer": string,                 // 2-6 sentences, concrete numbers, plain English
+  "table": { "columns": string[], "rows": (string|number|null)[][] } | null,  // when the answer is a list or breakdown (max 25 rows), else null
+  "chartType": "bar"|"line"|"pie"|"scatter"|"none",
+  "chartX": string | null,          // a column of "table" for the category/x axis
+  "chartY": string[] | null,        // numeric columns of "table" to plot
+  "confidence": "high"|"medium"|"low",
+  "followUpSuggestions": string[]   // 2-3 natural next questions
+}`;
+
+const RAG_MAX_TOKENS = 2000;
+
+/**
+ * One model call that reads the retrieved context and answers. No plan, no
+ * execution, no verification — the answer is the model's own reading of the
+ * context, which is what the RAG mode is for and why its results are
+ * labelled as unverified.
+ */
+export async function answerFromContext(
+  question: string,
+  context: string,
+  userApiKey?: string,
+  trace?: LlmCallTrace
+): Promise<RagAnswer> {
+  const clients = getClients(userApiKey);
+  if (clients.length === 0) throw new PlannerUnavailableError("no API key is configured (neither a server key nor one set in the browser).");
+
+  const userMessage = `CONTEXT
+${context}
+
+─────────────
+QUESTION: ${question}`;
+  const started = Date.now();
+  if (trace) { trace.systemPrompt = RAG_SYSTEM; trace.userPrompt = userMessage; }
+  let text: string, model: string, finishReason: string | undefined;
+  try {
+    ({ text, model, finishReason } = await completeJson(clients, RAG_SYSTEM, userMessage, RAG_MAX_TOKENS));
+  } catch (err) {
+    if (trace) trace.ms = Date.now() - started;
+    throw new PlannerUnavailableError(`every model/key in the chain failed (last error: ${err instanceof Error ? err.message : String(err)}). Try again in a minute or add another API key.`);
+  }
+  if (trace) { trace.model = model; trace.rawResponse = text; trace.ms = Date.now() - started; trace.finishReason = finishReason; }
+  const parsed = extractJson<RagAnswer>(text);
+  if (!parsed || typeof parsed.answer !== "string") throw new PlanParseError(text, model, finishReason === "length");
+  return parsed;
+}
+
 // ─── Result Explanation (Figure 8) ─────────────────────────────────────────
 
 export async function explainResults(
@@ -631,7 +732,7 @@ If the question asks for something this data cannot support — forecasting/pred
     }
     return parsed;
   } catch (err) {
-    console.error("explainResults: OpenRouter call failed, falling back to heuristic explanation:", err);
+    console.error("explainResults: model call failed, falling back to heuristic explanation:", err);
     if (trace) {
       trace.ms = Date.now() - started;
       trace.usedHeuristicFallback = true;
@@ -856,7 +957,7 @@ function heuristicExplanation(
 ): { explanation: string; followUpSuggestions: string[] } {
   const explanation = rows.length === 0
     ? `No rows matched "${question}".`
-    : `Returned ${rows.length} row${rows.length === 1 ? "" : "s"} across ${columns.length} column${columns.length === 1 ? "" : "s"} for "${question}". (Set OPENROUTER_API_KEY for an AI-generated explanation.)`;
+    : `Returned ${rows.length} row${rows.length === 1 ? "" : "s"} across ${columns.length} column${columns.length === 1 ? "" : "s"} for "${question}". (The model was unavailable for a written explanation; the figures above were computed and are exact.)`;
   return {
     explanation,
     followUpSuggestions: [],

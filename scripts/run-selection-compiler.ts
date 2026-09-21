@@ -27,7 +27,7 @@ import { mergeAggregatedResults } from "../src/lib/merge-results";
 import type { DatasetRecord } from "../src/lib/session-store";
 import type { QueryPlan } from "../src/lib/types";
 
-const DIR = path.resolve(__dirname, "../../test-data/validation-v2");
+const DIR = path.resolve(__dirname, "../test-data/validation-v2");
 const ds: DatasetRecord[] = [];
 for (const f of ["customers.csv", "subscriptions.csv"]) {
   const p = parseCSVBuffer(fs.readFileSync(path.join(DIR, f)));
@@ -47,7 +47,10 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 
 // Independent lookups — a LIST per key, so a duplicated key contributes twice, as a join would.
 const listBy = (rs: Row[], key: string) => { const m = new Map<string, Row[]>(); for (const r of rs) { const k = String(r[key]); (m.get(k) ?? m.set(k, []).get(k)!).push(r); } return m; };
-const custBy = listBy(rows(CUST), "customer_id");
+// A lookup table with a duplicated record (the same id twice) must not fan a
+// join out — the reference keeps one row per id, as the engine does.
+const oneBy = (rs: Row[], key: string) => new Map([...listBy(rs, key)].map(([k, v]) => [k, [v[0]]]));
+const custBy = oneBy(rows(CUST), "customer_id");
 const agentBy = listBy(rows(AG), "agent_id");
 const groupSum = (pairs: [string, number][]) => { const m = new Map<string, number>(); for (const [k, v] of pairs) m.set(k, r2((m.get(k) ?? 0) + v)); return m; };
 const groupCount = (keys: string[]) => { const m = new Map<string, number>(); for (const k of keys) m.set(k, (m.get(k) ?? 0) + 1); return m; };

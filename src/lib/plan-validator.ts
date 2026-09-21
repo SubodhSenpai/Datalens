@@ -143,11 +143,16 @@ export function validateAndRepairPlan(
   // doesn't exist post-join rather than letting it crash at execution time.
   if (repaired.derive?.length) {
     const kept: NonNullable<QueryPlan["derive"]> = [];
+    // Names an aggregation produces: a derive over them ("share = hits /
+    // total") runs after grouping and is valid even though no source column
+    // carries those names.
+    const aggOutputs = new Set((repaired.aggregations ?? []).map((a) => a.as ?? `${a.fn}_${a.column}`));
     for (const d of repaired.derive) {
       const idents = Array.from(new Set(d.expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []));
       let expr = d.expr;
       let ok = true;
       for (const ident of idents) {
+        if (aggOutputs.has(ident)) continue;
         const resolved = resolveColumn(ident, availableColumns);
         if (!resolved) { ok = false; break; }
         const col = availableColumns.find((c) => c.name === resolved);
@@ -200,6 +205,15 @@ export function validateAndRepairPlan(
         repairs.push({ field: "filters", detail: `Dropped filter on unknown column "${f.column}".` });
         continue;
       }
+      if (f.compareTo) {
+        const other = resolveColumn(f.compareTo, availableColumns);
+        if (!other) {
+          repairs.push({ field: "filters", detail: `Dropped filter comparing "${f.column}" with unknown column "${f.compareTo}".` });
+          continue;
+        }
+        kept.push({ ...f, column: col, compareTo: other });
+        continue;
+      }
       kept.push({ ...f, column: col });
     }
 
@@ -242,7 +256,11 @@ export function validateAndRepairPlan(
 
   if (repaired.aggregations?.length) {
     const kept = [];
-    for (const a of repaired.aggregations) {
+    for (const raw of repaired.aggregations) {
+      // Per-aggregate conditions reference post-join columns like any filter.
+      const a = raw.where?.length
+        ? { ...raw, where: raw.where.map((f) => ({ ...f, column: resolveColumn(f.column, availableColumns) ?? f.column, ...(f.compareTo ? { compareTo: resolveColumn(f.compareTo, availableColumns) ?? f.compareTo } : {}) })) }
+        : raw;
       // count tolerates any column type, but not any column NAME: counting a
       // column that only exists in a file the plan never reached silently
       // degrades into a row count of the wrong table. Resolve it like the
@@ -253,7 +271,7 @@ export function validateAndRepairPlan(
           ?? autoIncludeDatasetWithColumn(a.column, undefined, datasets, includedIds, relationships, availableColumns, joinedDatasets, repaired, repairs);
         if (!col) {
           repairs.push({ field: "aggregations", detail: `count on "${a.column}" — no such column exists in the data in play, so this counts rows instead.` });
-          kept.push(a);
+          kept.push({ ...a, column: "*", as: a.as ?? `count_${a.column}` });
         } else {
           kept.push({ ...a, column: col });
         }
@@ -290,8 +308,15 @@ export function validateAndRepairPlan(
   }
 
   if (repaired.correlate) {
-    const x = resolveColumn(repaired.correlate.columnX, availableColumns);
-    const y = resolveColumn(repaired.correlate.columnY, availableColumns);
+    // The grouped result's own columns (aggregate "as" names) are valid
+    // sides: the engine correlates those after aggregation.
+    const produced = (repaired.aggregations ?? []).map((a) => a.as ?? `${a.fn}_${a.column}`);
+    // A side that resolves to nothing may be an aggregate of a SIBLING
+    // sub-plan (a correlation between two tables' averages is computed on
+    // the merged result); with aggregations in play it is kept as written.
+    const resolveSide = (c: string) => (produced.includes(c) ? c : resolveColumn(c, availableColumns) ?? (repaired.aggregations?.length && /^[A-Za-z_][A-Za-z0-9_]*$/.test(c) ? c : undefined));
+    const x = resolveSide(repaired.correlate.columnX);
+    const y = resolveSide(repaired.correlate.columnY);
     if (!x || !y) {
       repairs.push({ field: "correlate", detail: `Dropped correlation — "${repaired.correlate.columnX}" and/or "${repaired.correlate.columnY}" not available.` });
       repaired.correlate = undefined;
@@ -432,6 +457,23 @@ export function validateAndRepairPlan(
       }
       repaired.having = kept.length > 0 ? kept : undefined;
     }
+  }
+
+  // A sort on a column the grouped result no longer has — typically the
+  // SOURCE of an aggregate ("sort by value" after "max(value) as peak") —
+  // is mapped to that aggregate's output; otherwise the sort silently did
+  // nothing and "the highest" came back as whichever group was first.
+  if (repaired.sort?.length && (repaired.aggregations?.length || repaired.groupBy?.length)) {
+    repaired.sort = repaired.sort.map((s) => {
+      if (predictedColumns.includes(s.column)) return s;
+      const agg = (repaired.aggregations ?? []).find((a) => a.column === s.column);
+      const alias = agg ? agg.as ?? `${agg.fn}_${agg.column}` : undefined;
+      if (alias && predictedColumns.includes(alias)) {
+        repairs.push({ field: "sort", detail: `Sort column "${s.column}" is aggregated as "${alias}" in the result → sorting by "${alias}".` });
+        return { ...s, column: alias };
+      }
+      return s;
+    });
   }
 
   if (repaired.chartType && repaired.chartType !== "none") {
@@ -590,7 +632,7 @@ function parseQuestionPeriod(question: string): { year?: string; monthIdx?: numb
 // "since 2020", "2023 or later", "before March" describe an OPEN-ENDED
 // period — pinning them to one bounded month/year would answer a narrower
 // question than the one asked, so period injection stays out of it.
-const OPEN_ENDED_PERIOD = /\b(or later|onwards?|since|after|before|until|up to|prior to|from)\b/i;
+const OPEN_ENDED_PERIOD = /\b(or later|onwards?|since|after|before|until|up to|prior to|from|as of|as at|by|overdue|due)\b/i;
 
 /**
  * Aligns a question's stated time period with the column that actually
@@ -636,6 +678,11 @@ export function resolveTimeFilters(
   // An existing range filter is already the right shape — leave it be.
   const existing = (plan.filters ?? []).filter((f) => f.column === column);
   if (existing.some((f) => ["gt", "gte", "lt", "lte"].includes(f.op))) return { plan, repairs };
+  // The plan already applies the date to SOME date-shaped column (a
+  // different one from the first found here, e.g. a due date rather than
+  // an installation date): the model has handled the time reference.
+  const dateLike = (v: unknown) => typeof v === "string" && (YEAR_MONTH_CELL.test(v) || ISO_DATE_CELL.test(v) || /^\d{4}-\d{2}(-\d{2})?$/.test(v));
+  if ((plan.filters ?? []).some((f) => f.column !== column && dateLike(f.value) && ["gt", "gte", "lt", "lte", "eq"].includes(f.op))) return { plan, repairs };
 
   const actualYears = new Set(
     rows.map((r) => (typeof r[column!] === "string" ? (r[column!] as string).slice(0, 4) : null)).filter((y): y is string => y !== null)

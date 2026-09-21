@@ -10,7 +10,7 @@ import * as path from "path";
 // behaviour is to say so rather than invent a number.
 
 const BASE_URL = "http://localhost:3000";
-const TEST_DATA = path.resolve(__dirname, "..", "..", "test-data");
+const TEST_DATA = path.resolve(__dirname, "..", "test-data");
 
 interface SemanticCase {
   id: number;

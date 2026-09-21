@@ -1,0 +1,11 @@
+﻿Employee ID,Full Name ,Dept,Joining Date,Salary (INR),Email
+E001,Aarav Sharma,Engineering,12/03/2019,"₹ 12,50,000",aarav@x.com
+E002,Diya Patel ,engineering,2020-07-01,"1,150,000",diya@x.com
+E003, Rohan Gupta,Sales,01-Aug-2021,9.5 lakh,rohan@x.com
+,,,,,
+E004,Meera Nair,Sales,2021/11/15,,meera@x.com
+E005,Kabir Khan,HR,15/02/2018,"₹8,00,000",kabir@x.com
+E002,Diya Patel,Engineering,2020-07-01,1150000,diya@x.com
+E006,Tara Menon,Finance,N/A,1400000,tara@x.com
+E007,Dev Bose,Marketing,2022-03-09,-5000,dev@x.com
+TOTAL,,,,"6,45,00,000",

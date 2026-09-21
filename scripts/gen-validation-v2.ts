@@ -56,7 +56,7 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 const fmt = (n: number, d = 2) => n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 const fmt0 = (n: number) => n.toLocaleString("en-US", { maximumFractionDigits: 0 });
 
-const OUT = path.resolve(__dirname, "..", "..", "test-data", "validation-v2");
+const OUT = path.resolve(__dirname, "..", "test-data", "validation-v2");
 fs.mkdirSync(OUT, { recursive: true });
 
 // ─── Reference pools — realistic, not invented categories ───────────────────

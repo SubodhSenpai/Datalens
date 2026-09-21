@@ -18,7 +18,7 @@ import { joinRows, executeQueryPlan } from "../src/lib/query-engine";
 import type { DatasetRecord } from "../src/lib/session-store";
 import type { QueryPlan } from "../src/lib/types";
 
-const DIR = path.resolve(__dirname, "../../test-data/validation");
+const DIR = path.resolve(__dirname, "../test-data/validation");
 function load(file: string): DatasetRecord {
   const p = parseCSVBuffer(fs.readFileSync(path.join(DIR, file)));
   return { id: file, name: file, columns: p.columns, rows: p.rows, rowCount: p.rowCount } as DatasetRecord;
@@ -84,7 +84,7 @@ async function main() {
 ${ok2 ? "PASS" : "FAIL"}  wrong base with no joins is still re-based (→ ${v2.plan.datasetId})`);
 
   // ── Unused inner joins: keep the ones that filter, drop the ones that inflate ──
-  const ADV = path.resolve(__dirname, "../../test-data/adversarial");
+  const ADV = path.resolve(__dirname, "../test-data/adversarial");
   const loadAdv = (f: string): DatasetRecord => {
     const p = parseCSVBuffer(fs.readFileSync(path.join(ADV, f)));
     return { id: f, name: f, columns: p.columns, rows: p.rows, rowCount: p.rowCount } as DatasetRecord;

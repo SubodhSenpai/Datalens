@@ -11,12 +11,20 @@
  *
  * One session, all four files uploaded once, 13 planner questions.
  * Run: npx tsx scripts/run-tier2-v2.ts
+ *   TIERS=1,2      which tiers' questions to send (default 2)
+ *   MODE=rag       send mode:"rag" so the RAG path answers instead of the planner
+ *   ONLY=2.3,2.4   only these ids
+ *   RUN_LABEL=x    log folder name
  */
 import fs from "fs";
 import path from "path";
 
 const BASE = "http://localhost:3000";
-const DIR = path.resolve(__dirname, "../../test-data/validation-v2");
+// SET=validation-v3 points at another set; its files and question key are discovered in the folder.
+const SET = process.env.SET ?? "validation-v2";
+const DIR = path.resolve(__dirname, "../test-data", SET);
+const DATA_FILES = fs.readdirSync(DIR).filter((f) => /\.(csv|xlsx)$/i.test(f)).sort();
+const QUESTIONS_FILE = fs.readdirSync(DIR).find((f) => /^TEST_QUESTIONS.*\.md$/i.test(f)) ?? "TEST_QUESTIONS_V2.md";
 
 // Optional: send one specific key with every query (the app's bring-your-
 // own-key path uses it exclusively). USE_ENV_KEY=OPENROUTER_API_KEY3 reads
@@ -35,17 +43,21 @@ fs.mkdirSync(LOG_DIR, { recursive: true });
 // key as generated, not retyped. Test-author hints in parentheses ("needs
 // …", "anti-join") are stripped from what is SENT — a user wouldn't type
 // them — but kept in the log for reference.
-const md = fs.readFileSync(path.join(DIR, "TEST_QUESTIONS_V2.md"), "utf8");
-const tier2 = md.split("## Tier 2")[1].split("## Tier 3")[0];
-const CASES = tier2
+const md = fs.readFileSync(path.join(DIR, QUESTIONS_FILE), "utf8");
+const TIERS = (process.env.TIERS ?? "2").split(",").map((t) => t.trim()).filter(Boolean);
+const MODE = process.env.MODE === "rag" ? "rag" : "deterministic";
+const tierText = TIERS.map((t) => md.split(`## Tier ${t}`)[1]?.split(/\n## Tier /)[0] ?? "").join("\n");
+const CASES = tierText
   .split("\n")
-  .filter((l) => /^\| 2\.\d+ \|/.test(l))
+  .filter((l) => /^\| \d+\.\d+ \|/.test(l))
   .map((l) => {
     const cells = l.split("|").map((c) => c.trim());
     const id = cells[1];
     const original = cells[2];
-    const expected = cells[3];
-    const question = original.replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
+    // Tiers 1-2 have one expected cell; Tier 3 has chart + data, Tier 4 has what-it-tests + expected.
+    const expected = cells.slice(3, -1).filter(Boolean).join(" | ");
+    // Only author hints are stripped ("needs …", "anti-join"); a parenthetical that defines the question ("open subscriptions") is part of it.
+    const question = original.replace(/\s*\((?=[^)]*(needs|anti-join|join))[^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
     return { id, original, question, expected };
   });
 
@@ -66,7 +78,7 @@ async function main() {
   const sessionId = "v2t2_" + Math.random().toString(36).slice(2);
   const ids: string[] = [];
   const uploaded: string[] = [];
-  for (const f of ["customers.csv", "subscriptions.csv", "billing.xlsx", "support.xlsx"]) {
+  for (const f of DATA_FILES) {
     const form = new FormData();
     form.set("sessionId", sessionId);
     form.append("files", new Blob([fs.readFileSync(path.join(DIR, f))]), f);
@@ -78,7 +90,7 @@ async function main() {
   console.log(`session ${sessionId}: ${ids.length} datasets in scope\n  ${uploaded.join("\n  ")}\n  key: ${API_KEY ? `${process.env.USE_ENV_KEY} (…${API_KEY.slice(-6)})` : "server rotation"}\n`);
 
   const summary: string[] = [
-    "# Tier 2 run — validation-v2",
+    `# Tier ${TIERS.join("+")} run — ${SET} — mode: ${MODE}`,
     "",
     `Session \`${sessionId}\`, ${ids.length} datasets: ${uploaded.join(", ")}`,
     "",
@@ -97,7 +109,7 @@ async function main() {
       const res = await fetch(`${BASE}/api/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, question: c.question, datasetIds: ids, ...(API_KEY ? { apiKey: API_KEY } : {}) }),
+        body: JSON.stringify({ sessionId, question: c.question, datasetIds: ids, mode: MODE, ...(API_KEY ? { apiKey: API_KEY } : {}) }),
       });
       body = await res.json();
       if (!res.ok) error = `HTTP ${res.status}: ${JSON.stringify(body)}`;
@@ -151,10 +163,13 @@ async function main() {
     ].join("\n");
     fs.writeFileSync(path.join(LOG_DIR, `${c.id.replace(".", "_")}.log.md`), log);
 
-    const firstRows = rows.slice(0, 3).map((r) => Object.values(r).join(" / ")).join(" ; ").slice(0, 120);
+    const firstRows = (rows.length
+      ? rows.slice(0, 3).map((r) => Object.values(r).join(" / ")).join(" ; ")
+      : String(result.explanation ?? "").split(" Important:")[0]).slice(0, 160).replace(/\|/g, "/");
     const joins = `${source.files ? (source.files as string[]).join(" + ") : "?"}`;
     summary.push(`| ${c.id} | ${c.question.slice(0, 60)} | ${rows.length} | ${joins} | ${repairs.length} | ${fallback ? "YES" : ""} | ${firstRows || (error ? "ERROR" : "—")} | ${c.expected.slice(0, 70).replace(/\|/g, "/")}… |`);
     console.log(`${c.id}  rows=${rows.length}  files=${joins}  repairs=${repairs.length}${fallback ? "  FALLBACK" : ""}${error ? "  ERROR" : ""}  (${ms} ms)`);
+    if (MODE === "rag") console.log(`      ${firstRows}`);
   }
 
   fs.writeFileSync(path.join(LOG_DIR, "SUMMARY.md"), summary.join("\n") + "\n");

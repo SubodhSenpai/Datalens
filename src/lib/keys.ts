@@ -1,3 +1,4 @@
+import { isPlaceholder } from "./clean";
 /**
  * The single definition of "these two cell values are the same join key".
  *
@@ -32,7 +33,7 @@ export function normalizeKey(value: unknown): string | null {
   const lower = raw.toLowerCase();
   // Placeholders are not identities: without this, every row carrying "N/A"
   // in its key column would join to every other such row.
-  if (lower === "null" || lower === "undefined" || lower === "n/a" || lower === "na" || lower === "-") {
+  if (lower === "undefined" || isPlaceholder(raw)) {
     return null;
   }
 

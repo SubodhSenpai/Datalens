@@ -17,7 +17,7 @@ import { joinRows } from "../src/lib/query-engine";
 import { detectColumnAmbiguity } from "../src/lib/data-dictionary";
 import type { DatasetRecord, RelationshipRecord } from "../src/lib/session-store";
 
-const DIR = path.resolve(__dirname, "../../test-data/adversarial");
+const DIR = path.resolve(__dirname, "../test-data/adversarial");
 
 function load(file: string): DatasetRecord {
   const parsed = parseCSVBuffer(fs.readFileSync(path.join(DIR, file)));

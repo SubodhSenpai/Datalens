@@ -1,3 +1,4 @@
+import { isPlaceholder, parseNumberLoose } from "./clean";
 import { DatasetFile, ColumnSchema, SUPPORTED_FORMATS, MAX_FILE_SIZE_MB } from "./types";
 
 // ─── File Validation ──────────────────────────────────────────────────────────
@@ -43,29 +44,43 @@ export function getTotalSize(datasets: DatasetFile[]): number {
 // actual date shapes is checked FIRST; Date.parse only confirms parseability
 // of a string that already looks like a real date.
 const DATE_PATTERNS: RegExp[] = [
-  /^\d{4}-\d{1,2}-\d{1,2}(T\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$/, // ISO 8601
-  /^\d{4}\/\d{1,2}\/\d{1,2}$/, // YYYY/MM/DD
-  /^\d{1,2}\/\d{1,2}\/\d{4}$/, // MM/DD/YYYY or DD/MM/YYYY
-  /^\d{1,2}-\d{1,2}-\d{4}$/, // MM-DD-YYYY or DD-MM-YYYY
+  /^\d{4}-\d{1,2}-\d{1,2}([T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$/, // ISO 8601, also "YYYY-MM-DD HH:mm" as SQL/Excel export it
+  /^\d{4}\/\d{1,2}\/\d{1,2}( \d{1,2}:\d{2}(:\d{2})?)?$/, // YYYY/MM/DD, optional time
+  /^\d{1,2}\/\d{1,2}\/\d{4}( \d{1,2}:\d{2}(:\d{2})?)?$/, // MM/DD/YYYY or DD/MM/YYYY, optional time
+  /^\d{1,2}-\d{1,2}-\d{4}( \d{1,2}:\d{2}(:\d{2})?)?$/, // MM-DD-YYYY or DD-MM-YYYY, optional time
   /^[A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4}$/, // "January 5, 2024" / "Jan 5 2024"
   /^\d{1,2}\s+[A-Za-z]{3,9}\.?,?\s+\d{4}$/, // "5 January 2024"
+  /^\d{1,2}[-\/][A-Za-z]{3,9}[-\/]\d{4}$/, // "01-Aug-2021" / "5/Jan/2024"
+  /^[A-Za-z]{3,9}[-\/]\d{1,2}[-\/]\d{4}$/, // "Aug-01-2021"
 ];
 
 export function looksLikeDate(value: string): boolean {
   return DATE_PATTERNS.some((p) => p.test(value.trim()));
 }
 
+/**
+ * dd/mm/yyyy, mm/dd/yyyy, dd-mm-yyyy, with optional time. Date.parse reads
+ * these US-first and rejects a day above 12, so parse.ts handles them with
+ * the day order decided per column; here it only marks them parseable.
+ */
+export const NUMERIC_DATE = /^(\d{1,2})([/-])(\d{1,2})\2(\d{4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/;
+
 export function inferColumnType(values: string[]): ColumnSchema["type"] {
-  const nonEmpty = values.filter((v) => v !== "" && v !== null && v !== undefined);
+  const nonEmpty = values.filter((v) => v !== "" && v !== null && v !== undefined && !isPlaceholder(v));
   if (nonEmpty.length === 0) return "unknown";
 
-  const isNumber = nonEmpty.every((v) => !isNaN(Number(v)) && v.trim() !== "");
+  // Formatted numbers ("₹1,20,000", "12%", "(500)") are numbers. A column is
+  // numeric when at least 98% of its filled cells read as one — a stray
+  // "TBD" in a salary column does not turn the whole column into text.
+  const numeric = nonEmpty.filter((v) => parseNumberLoose(v) !== null).length;
+  const tolerated = Math.max(1, Math.floor(nonEmpty.length * 0.02));
+  const isNumber = numeric === nonEmpty.length || (numeric >= 3 && numeric >= nonEmpty.length - tolerated);
   if (isNumber) return "number";
 
   const isBoolean = nonEmpty.every((v) => ["true", "false", "0", "1", "yes", "no"].includes(v.toLowerCase()));
   if (isBoolean) return "boolean";
 
-  const isDate = nonEmpty.slice(0, 10).every((v) => looksLikeDate(v) && !isNaN(Date.parse(v)));
+  const isDate = nonEmpty.slice(0, 10).every((v) => looksLikeDate(v) && (NUMERIC_DATE.test(v.trim()) || !isNaN(Date.parse(v))));
   if (isDate) return "date";
 
   return "string";

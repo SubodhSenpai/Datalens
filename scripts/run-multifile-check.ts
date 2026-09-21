@@ -10,7 +10,7 @@ import fs from "fs";
 import path from "path";
 
 const BASE = "http://localhost:3000";
-const DIR = path.resolve(__dirname, "../../test-data/validation");
+const DIR = path.resolve(__dirname, "../test-data/validation");
 
 interface Case {
   id: string;

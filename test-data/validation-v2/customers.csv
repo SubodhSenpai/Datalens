@@ -1,0 +1,152 @@
+customer_id,company,industry,country,city,signup_date,account_manager_id,status,employees_count
+C0001,Pioneer Retail Group,Education,Canada,Toronto,2022-03-22,AG006,Churned,500
+C0002,Ember Learning Inc.,Manufacturing,Germany,Munich,2024-09-20,AG002,Active,1500
+C0003,Delta Robotics,Logistics,United Kingdom,Manchester,2022-09-03,AG002,Active,85
+C0004,Blue Ridge Labs Inc.,Education,Germany,Munich,2022-04-20,AG014,Churned,900
+C0005,Beacon Energy Corp.,Media,United Kingdom,Edinburgh,2023-02-15,AG018,Active,40
+C0006,Beacon Systems GmbH,Fintech,Australia,Melbourne,2022-03-31,AG014,Churned,500
+C0007,Northstar Robotics Inc.,Education,Australia,Melbourne,2025-01-24,AG009,Active,60
+C0008,Delta Foods,Fintech,Australia,Melbourne,2023-05-10,AG005,Active,200
+C0009,Zenith Media Ltd,Retail,United Kingdom,Edinburgh,2023-11-28,AG001,Active,350
+C0010,Falcon Analytics Corp.,Media,United States,Seattle,2024-04-02,AG021,Active,350
+C0011,Harbor Media,Media,United States,Chicago,2024-08-11,AG006,Active,900
+C0012,Granite Systems,Healthcare,United States,Seattle,2023-06-22,AG005,Active,1500
+C0013,Apex Health LLC,Education,United States,San Francisco,2025-05-10,AG006,Active,60
+C0014,Redwood Analytics LLC,Media,United States,New York,2022-09-15,AG013,Active,60
+C0015,Keystone Learning Pvt Ltd,Healthcare,Brazil,Rio de Janeiro,2023-07-06,AG022,Churned,40
+C0016,Quantum Logistics Corp.,Healthcare,Canada,Toronto,2023-02-15,AG021,Active,25
+C0017,Juniper Networks Corp.,Energy,Australia,Sydney,2022-08-24,AG022,Active,900
+C0018,Driftwood Foods,Logistics,United Kingdom,Manchester,2022-09-24,AG005,Active,60
+C0019,Evergreen Systems Pvt Ltd,Fintech,United States,New York,2023-02-16,AG005,Active,500
+C0020,Summit Analytics Inc.,Media,United States,Seattle,2022-06-23,AG022,Active,500
+C0021,Willow Health Pte Ltd,Manufacturing,United Kingdom,Manchester,2023-09-24,AG022,Active,60
+C0022,Aurora Mobility Pvt Ltd,Manufacturing,United States,San Francisco,2023-06-12,AG014,Churned,1500
+C0023,Union Learning,Manufacturing,Canada,Vancouver,2023-03-15,AG018,Active,60
+C0024,Summit Learning Ltd,Retail,United Kingdom,London,2023-08-15,AG005,Active,60
+C0025,Ember Networks Pvt Ltd,Manufacturing,Canada,Vancouver,2023-09-18,AG010,Active,900
+C0026,Ember Energy Inc.,Healthcare,India,Hyderabad,2023-09-22,AG021,Active,60
+C0027,Summit Energy LLC,Retail,India,Pune,2022-12-31,AG009,Churned,350
+C0028,Redwood Foods LLC,Fintech,India,Hyderabad,2024-01-30,AG022,Active,500
+C0029,Juniper Systems Pvt Ltd,Healthcare,United States,San Francisco,2024-07-01,AG002,Active,60
+C0030,Ember Health LLC,Education,United States,Chicago,2025-02-03,AG014,Active,85
+C0031,Aurora Robotics Pvt Ltd,Education,United Kingdom,London,2023-12-01,AG010,Active,85
+C0032,Evergreen Media LLC,Retail,United States,Seattle,2022-01-13,AG005,Active,25
+C0033,Frontier Labs LLC,Logistics,India,Bengaluru,2022-11-22,AG017,Churned,900
+C0034,Aurora Capital Corp.,Logistics,United States,San Francisco,2022-04-13,AG018,Churned,120
+C0035,Apex Logistics Pvt Ltd,Education,Australia,Melbourne,2024-06-24,AG018,Active,85
+C0036,Redwood Analytics Pvt Ltd,Education,India,Hyderabad,2024-02-02,AG022,Active,1500
+C0037,Harbor Logistics Ltd,Retail,United States,Chicago,2022-08-22,AG005,Active,200
+C0038,Meridian Energy Inc.,Retail,Australia,Melbourne,2024-10-19,AG009,Active,900
+C0039,Blue Ridge Foods,Logistics,United States,New York,2025-05-07,AG017,Active,60
+C0040,Northstar Analytics LLC,Fintech,United States,Austin,2023-08-07,AG005,Active,200
+C0041,Juniper Energy Pvt Ltd,Education,United States,Seattle,2023-11-01,AG014,Churned,60
+C0042,Driftwood Retail Group GmbH,Energy,United States,San Francisco,2022-04-16,AG018,Active,60
+C0043,Delta Health Inc.,Logistics,Germany,Berlin,2024-01-31,AG002,Active,200
+C0044,Cedar Capital Pvt Ltd,Education,United States,New York,2023-02-24,AG013,Active,40
+C0045,Summit Mobility Ltd,Logistics,United States,Austin,2022-05-04,AG014,Active,500
+C0046,Northstar Energy Pte Ltd,Fintech,Canada,Vancouver,2023-02-02,AG001,Active,60
+C0047,Pioneer Networks Ltd,Retail,United States,Austin,2023-10-09,AG018,Active,12
+C0048,Driftwood Robotics GmbH,Logistics,United States,Chicago,2023-08-30,AG021,Active,500
+C0049,Cobalt Networks GmbH,Manufacturing,India,Mumbai,2024-02-04,AG005,Active,900
+C0050,Zenith Networks LLC,Fintech,Germany,Hamburg,2023-11-30,AG013,Active,60
+C0051,Driftwood Networks GmbH,Manufacturing,India,Bengaluru,2023-03-10,AG005,Churned,40
+C0052,Orchard Labs,Manufacturing,Germany,Hamburg,2022-01-21,AG005,Churned,60
+C0053,Apex Mobility LLC,Media,Germany,Berlin,2025-03-06,AG001,Churned,12
+C0054,Vertex Foods Pte Ltd,Logistics,Australia,Melbourne,2024-03-30,AG022,Active,60
+C0055,Granite Energy GmbH,Manufacturing,India,Hyderabad,2022-06-22,AG002,Active,85
+C0056,Iron Media Inc.,Logistics,India,Hyderabad,2025-05-19,AG001,Active,500
+C0057,Blue Ridge Foods Pvt Ltd,Healthcare,Germany,Hamburg,2024-10-28,AG017,Churned,350
+C0058,Union Labs LLC,Logistics,United States,Austin,2024-01-11,AG018,Churned,120
+C0059,Apex Retail Group Ltd,Retail,Germany,Berlin,2024-01-10,AG018,Active,500
+C0060,Lumen Foods GmbH,Media,India,Pune,2025-05-19,AG005,Active,85
+C0061,Apex Energy,Fintech,United States,San Francisco,2022-01-30,AG013,Active,1500
+C0062,Meridian Robotics Corp.,Retail,India,Mumbai,2022-11-17,AG002,Active,900
+C0063,Keystone Mobility Inc.,Media,United States,New York,2022-06-21,AG001,Active,900
+C0064,Vertex Learning GmbH,Energy,United States,Austin,2024-02-08,AG010,Active,900
+C0065,Meridian Analytics Pte Ltd,Education,India,Mumbai,2025-04-28,AG001,Active,40
+C0066,Willow Retail Group Pvt Ltd,Manufacturing,United States,Chicago,2022-12-26,AG001,Active,60
+C0067,Delta Foods Pvt Ltd,Fintech,India,Bengaluru,2025-02-15,AG014,Active,12
+C0068,Quantum Capital Pvt Ltd,Fintech,Germany,Hamburg,2023-10-26,AG009,Active,200
+C0069,Beacon Networks,Energy,Australia,Sydney,2022-07-18,AG013,Active,500
+C0070,Summit Health LLC,Media,India,Mumbai,2024-03-17,AG005,Active,12
+C0071,Iron Media Pvt Ltd,Fintech,United States,Chicago,2023-10-03,AG018,Active,1500
+C0072,Ember Learning Ltd,Media,United Kingdom,Edinburgh,2022-07-24,AG017,Active,200
+C0073,Willow Labs GmbH,Education,India,Mumbai,2023-07-21,AG001,Active,12
+C0074,Lumen Capital Pte Ltd,Fintech,United Kingdom,Manchester,2024-04-24,AG013,Churned,40
+C0075,Juniper Mobility Ltd,Media,Canada,Toronto,2022-03-24,AG017,Churned,120
+C0076,Summit Studios Corp.,Retail,United Kingdom,Manchester,2023-01-22,AG001,Churned,120
+C0077,Zenith Retail Group Pte Ltd,Healthcare,India,Hyderabad,2022-01-20,AG002,Churned,1500
+C0078,Frontier Labs Inc.,Media,United Kingdom,London,2025-03-11,AG021,Active,12
+C0079,Quantum Robotics LLC,Energy,United States,New York,2022-08-04,AG009,Active,350
+C0080,Zenith Capital GmbH,Manufacturing,United Kingdom,London,2022-03-16,AG005,Active,350
+C0081,Tidal Labs LLC,Media,Canada,Toronto,2022-05-04,AG010,Active,900
+C0082,Summit Media Pte Ltd,Fintech,United States,Seattle,2023-01-25,AG022,Active,900
+C0083,Lumen Systems LLC,Retail,Singapore,Singapore,2022-10-25,AG010,Churned,500
+C0084,Orchard Networks GmbH,Healthcare,United States,Chicago,2025-05-05,AG001,Active,120
+C0085,Frontier Mobility GmbH,Manufacturing,Germany,Hamburg,2024-09-15,AG001,Active,120
+C0086,Apex Logistics LLC,Logistics,United States,Austin,2023-05-09,AG021,Active,200
+C0087,Cobalt Health LLC,Logistics,Singapore,Singapore,2023-02-20,AG022,Churned,900
+C0088,Quantum Analytics Ltd,Fintech,Germany,Hamburg,2025-05-20,AG002,Active,900
+C0089,Frontier Retail Group LLC,Education,United States,New York,2022-08-08,AG013,Active,25
+C0090,Ember Foods Corp.,Energy,United States,Seattle,2023-11-08,AG018,Active,1500
+C0091,Falcon Retail Group LLC,Energy,United Kingdom,Manchester,2024-01-18,AG010,Active,12
+C0092,Willow Networks Inc.,Healthcare,United States,San Francisco,2022-03-03,AG014,Active,40
+C0093,Evergreen Labs Ltd,Manufacturing,Germany,Berlin,2023-09-02,AG006,Churned,25
+C0094,Beacon Analytics Inc.,Fintech,Germany,Hamburg,2023-05-16,AG018,Active,500
+C0095,Summit Systems LLC,Healthcare,United States,Austin,2022-07-09,AG013,Active,500
+C0096,Union Systems Pte Ltd,Retail,United Kingdom,Edinburgh,2024-12-12,AG002,Active,200
+C0097,Zenith Capital Corp.,Energy,Canada,Vancouver,2022-09-11,AG014,Active,40
+C0098,Beacon Analytics,Education,Germany,Hamburg,2022-09-21,AG013,Churned,25
+C0099,Iron Health Pvt Ltd,Education,United States,Seattle,2024-06-25,AG005,Active,60
+C0100,Keystone Networks,Manufacturing,United States,San Francisco,2025-02-17,AG022,Active,85
+C0101,Zenith Foods LLC,Media,United States,Austin,2025-02-03,AG021,Active,12
+C0102,Beacon Analytics Pte Ltd,Energy,Germany,Munich,2023-05-29,AG006,Active,500
+C0103,Tidal Logistics Pte Ltd,Retail,Singapore,Singapore,2024-07-16,AG017,Active,12
+C0104,Union Retail Group GmbH,Manufacturing,India,Hyderabad,2024-09-19,AG014,Active,500
+C0105,Pioneer Labs,Logistics,Germany,Hamburg,2022-12-18,AG022,Churned,500
+C0106,Iron Logistics Ltd,Media,United States,Seattle,2022-12-08,AG014,Active,500
+C0107,Redwood Media,Education,United Kingdom,London,2024-05-09,AG005,Active,200
+C0108,Meridian Energy Pvt Ltd,Media,United States,Austin,2022-11-20,AG006,Active,85
+C0109,Cedar Networks Pte Ltd,Energy,United States,New York,2023-08-20,AG009,Churned,85
+C0110,Pioneer Health Pvt Ltd,Manufacturing,United States,New York,2025-02-20,AG021,Active,1500
+C0111,Driftwood Media,Retail,Canada,Vancouver,2022-04-15,AG002,Active,25
+C0112,Evergreen Retail Group Ltd,Healthcare,United States,Austin,2022-10-14,AG005,Active,350
+C0113,Cedar Foods Corp.,Energy,Germany,Berlin,2025-01-07,AG009,Active,500
+C0114,Redwood Logistics Corp.,Fintech,India,Hyderabad,2025-01-11,AG006,Active,200
+C0115,Cedar Media Pvt Ltd,Media,Germany,Munich,2024-06-05,AG005,Active,500
+C0116,Northstar Labs GmbH,Energy,United Kingdom,London,2023-05-01,AG006,Active,60
+C0117,Redwood Retail Group,Retail,United Kingdom,Edinburgh,2024-05-23,AG013,Active,60
+C0118,Meridian Capital LLC,Fintech,Germany,Berlin,2023-10-25,AG014,Active,25
+C0119,Apex Analytics Ltd,Retail,India,Bengaluru,2025-01-07,AG013,Active,500
+C0120,Falcon Capital Inc.,Energy,United States,San Francisco,2024-04-13,AG022,Churned,85
+C0121,Frontier Foods LLC,Education,Brazil,São Paulo,2022-01-19,AG009,Churned,200
+C0122,Apex Health Pvt Ltd,Fintech,India,Bengaluru,2022-01-19,AG002,Active,40
+C0123,Union Mobility Pte Ltd,Education,India,Mumbai,2023-03-01,AG006,Active,25
+C0124,Vertex Mobility GmbH,Education,Singapore,Singapore,2022-12-21,AG009,Active,350
+C0125,Keystone Labs Corp.,Fintech,United Kingdom,Edinburgh,2024-02-25,AG005,Active,60
+C0126,Aurora Studios,Education,United Kingdom,Manchester,2024-07-12,AG022,Active,200
+C0127,Delta Logistics Corp.,Fintech,United States,Chicago,2025-04-08,AG013,Active,500
+C0128,Delta Health,Education,Australia,Melbourne,2025-04-07,AG014,Active,85
+C0129,Aurora Mobility Inc.,Media,Canada,Vancouver,2022-01-09,AG006,Active,120
+C0130,Evergreen Health Pte Ltd,Fintech,United States,New York,2023-05-08,AG014,Churned,900
+C0131,Lumen Health GmbH,Media,United States,San Francisco,2022-10-13,AG010,Active,500
+C0132,Beacon Systems,Energy,United States,San Francisco,2024-01-22,AG006,Active,120
+C0133,Willow Capital Pte Ltd,Media,United Kingdom,Edinburgh,2024-06-21,AG002,Active,200
+C0134,Union Systems Pvt Ltd,Energy,Australia,Melbourne,2023-09-20,AG021,Active,85
+C0135,Iron Capital Pvt Ltd,Manufacturing,United States,Seattle,2024-07-02,AG013,Active,900
+C0136,Northstar Robotics LLC,Manufacturing,United States,Austin,2022-06-17,AG017,Active,25
+C0137,Harbor Systems Pte Ltd,Education,United States,New York,2024-05-05,AG006,Active,85
+C0138,Juniper Retail Group Inc.,Retail,United States,Seattle,2023-10-23,AG017,Active,12
+C0139,Driftwood Capital Corp.,Education,United Kingdom,Edinburgh,2022-10-07,AG014,Churned,900
+C0140,Driftwood Analytics Pte Ltd,Energy,India,Mumbai,2025-04-19,AG017,Active,60
+C0141,Cedar Foods GmbH,Logistics,India,Bengaluru,2022-08-03,AG018,Active,25
+C0142,Zenith Retail Group GmbH,Healthcare,India,Mumbai,2024-12-07,AG001,Active,1500
+C0143,Orchard Robotics Pvt Ltd,Healthcare,India,Bengaluru,2022-01-30,AG010,Active,120
+C0144,Ember Retail Group GmbH,Manufacturing,Germany,Berlin,2024-10-06,AG009,Active,120
+C0145,Juniper Logistics Pte Ltd,Logistics,India,Pune,2022-09-04,AG009,Active,350
+C0146,Harbor Labs Ltd,Logistics,United Kingdom,Manchester,2022-05-01,AG013,Churned,500
+C0147,Frontier Mobility Pvt Ltd,Fintech,Canada,Vancouver,2022-11-17,AG022,Active,200
+C0148,Granite Health Corp.,Manufacturing,Singapore,Singapore,2025-05-22,AG005,Active,25
+C0149,Redwood Mobility Ltd,Media,Brazil,Rio de Janeiro,2022-02-06,AG005,Churned,25
+C0150,Summit Health Pte Ltd,Media,United Kingdom,Edinburgh,2023-08-04,AG017,Active,40
+C0042,DRIFTWOOD RETAIL GROUP GMBH,Energy,United States,San Francisco,2022-04-16,AG018,Active,60

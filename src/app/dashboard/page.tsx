@@ -11,7 +11,7 @@ import SessionBadge from "@/components/SessionBadge";
 import ChartEvalPanel from "@/components/ChartEvalPanel";
 import DataDictionaryPanel from "@/components/DataDictionaryPanel";
 import ApiKeySettings, { loadStoredApiKey } from "@/components/ApiKeySettings";
-import { DatasetFile, QueryResult, Session } from "@/lib/types";
+import { DatasetFile, DatasetLink, QueryMode, QueryResult, Session } from "@/lib/types";
 import { generateSessionId } from "@/lib/utils";
 
 export default function DashboardPage() {
@@ -24,11 +24,12 @@ export default function DashboardPage() {
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState(() => loadStoredApiKey());
 
-  const handleFilesUploaded = useCallback((newDatasets: DatasetFile[]) => {
+  const handleFilesUploaded = useCallback((newDatasets: DatasetFile[], links: DatasetLink[]) => {
     setSession(prev => {
       if (!prev) return prev;
       const combined = [...prev.datasets, ...newDatasets];
-      return { ...prev, datasets: combined, totalSize: combined.reduce((a, d) => a + d.size, 0) };
+      // The server recomputes links over the whole session on each upload.
+      return { ...prev, datasets: combined, links, totalSize: combined.reduce((a, d) => a + d.size, 0) };
     });
     setShowUpload(false);
   }, []);
@@ -37,15 +38,16 @@ export default function DashboardPage() {
     setSession(prev => {
       if (!prev) return prev;
       const datasets = prev.datasets.filter(d => d.id !== id);
-      return { ...prev, datasets, totalSize: datasets.reduce((a, d) => a + d.size, 0) };
+      const links = (prev.links ?? []).filter(l => l.datasetIdA !== id && l.datasetIdB !== id);
+      return { ...prev, datasets, links, totalSize: datasets.reduce((a, d) => a + d.size, 0) };
     });
     if (session) fetch(`/api/dataset/${id}?sessionId=${encodeURIComponent(session.id)}`, { method: "DELETE" });
   }, [session]);
 
-  const handleQuery = useCallback(async (question: string, selectedIds: string[]) => {
+  const handleQuery = useCallback(async (question: string, selectedIds: string[], mode: QueryMode = "deterministic") => {
     if (!session) return;
     const queryId = "q_" + Date.now().toString(36);
-    const newQuery: QueryResult = { id: queryId, question, timestamp: new Date(), status: "running" };
+    const newQuery: QueryResult = { id: queryId, question, timestamp: new Date(), status: "running", mode };
     setQueries(prev => [newQuery, ...prev]);
     setActiveQueryId(queryId);
     setIsQuerying(true);
@@ -53,7 +55,7 @@ export default function DashboardPage() {
       const res = await fetch("/api/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: session.id, question, datasetIds: selectedIds, apiKey: apiKey || undefined }),
+        body: JSON.stringify({ sessionId: session.id, question, datasetIds: selectedIds, apiKey: apiKey || undefined, mode }),
       });
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const data = await res.json();
@@ -99,7 +101,7 @@ export default function DashboardPage() {
             </button>
           </div>
           {hasDatasets ? (
-            <DatasetList datasets={session!.datasets} onRemove={handleRemoveDataset} />
+            <DatasetList datasets={session!.datasets} links={session!.links ?? []} onRemove={handleRemoveDataset} />
           ) : (
             <div className="px-4 py-5 text-center text-[13px] text-text-secondary bg-bg-card border-2 border-dashed border-ink rounded-xl leading-relaxed">
               Nothing yet.

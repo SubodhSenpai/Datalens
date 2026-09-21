@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { QueryRequest, QueryResult, QueryPlan, ChartDataPoint, PipelineStep } from "@/lib/types";
+import { QueryRequest, QueryResult, QueryPlan, ChartDataPoint, DatasetLink, PipelineStep } from "@/lib/types";
 import { getSession, ensureDatasetRows } from "@/lib/session-store";
 import { planSelection, explainResults, PlanParseError, LlmCallTrace } from "@/lib/llm";
 import { buildSemanticModel } from "@/lib/semantic-model";
-import { compileSelection, Selection } from "@/lib/compile-selection";
+import { compileSelection, Selection, selectionSignature } from "@/lib/compile-selection";
 import { mergeAggregatedResults } from "@/lib/merge-results";
 import { planToPandas } from "@/lib/pandas-codegen";
-import { executeQueryPlan, joinRows, JoinKeyMissingError, JoinStats } from "@/lib/query-engine";
+import { executeQueryPlan, joinRows, JoinKeyMissingError, JoinStats, computePearsonCorrelation, interpretCorrelation } from "@/lib/query-engine";
 import { evaluateChartChoice } from "@/lib/chart-eval";
 import { validateAndRepairPlan, injectMissingValueFilters, correctHallucinatedDateFilterYear, resolveTimeFilters, dropUnsatisfiableRangeFilters, referencedColumns, PlanRepair } from "@/lib/plan-validator";
 import { detectUnsupportedConcepts, stripMisleadingAliases, detectPlannerHedging, plannerSaysUnanswerable } from "@/lib/concept-guard";
@@ -14,12 +14,42 @@ import { detectColumnAmbiguity } from "@/lib/data-dictionary";
 import { findUnselectedMentioned } from "@/lib/scope";
 import { assessPlan, retryFeedback, PlanAssessment } from "@/lib/answer-check";
 import { linkSchema } from "@/lib/schema-linking";
+import { answerWithRag } from "./rag";
 
 export const runtime = "nodejs";
 
 // Planner calls per question, including the first. Each retry is a real
 // LLM call, so this is a hard ceiling rather than a target.
 const MAX_PLAN_ATTEMPTS = 3;
+
+// Cross-file questions get a second, independent draft; the two are
+// compared on what they compute. Agreement is taken as confirmation;
+// disagreement is settled by a reconciling call that sees both drafts.
+// This trades one extra call on multi-table questions for most of the
+// run-to-run variance of a small model. PLAN_CONSENSUS=off disables it.
+const PLAN_CONSENSUS = process.env.PLAN_CONSENSUS !== "off";
+const SECOND_OPINION = [
+  "",
+  "─────────────",
+  "This is an independent second reading of the same question. Read it afresh — in particular check WHICH table each quantity lives in, whether a named term is a value of a column (then filter that column), whether a data-quality flag should restrict the rows, and whether the question needs every row or only one end of a ranking.",
+].join("\n");
+const reconcilePrompt = (a: Selection, b: Selection) => [
+  "",
+  "─────────────",
+  "Two independent drafts of the selection for this question disagree. Draft A:",
+  JSON.stringify(a),
+  "Draft B:",
+  JSON.stringify(b),
+  "Decide which draft reads the question correctly (or combine the correct parts of both) and output that final selection only. Prefer the draft whose measure comes from the table that actually holds the quantity asked about, whose filters use values listed in the menu, and that respects any data-quality flag.",
+].join("\n");
+
+// "Delete the …", "update every …": an instruction to modify data rather
+// than a question about it. Only a leading verb counts — "how many were
+// removed" is a question.
+const MUTATION_VERB = /^\s*(?:please\s+|can you\s+|could you\s+)?(?:delete|remove|drop|erase|purge|truncate|update|modify|change|overwrite|insert|rename|set)\b/i;
+function isMutationRequest(question: string): boolean {
+  return MUTATION_VERB.test(question);
+}
 
 // Repairs that changed WHICH data the user is looking at deserve a line in
 // the explanation; purely cosmetic ones (a corrected column spelling) don't.
@@ -38,7 +68,7 @@ function materialRepairNotes(repairs: PlanRepair[]): string[] {
  */
 export async function POST(req: NextRequest) {
   const body = (await req.json()) as QueryRequest;
-  const { sessionId, question, datasetIds, apiKey } = body;
+  const { sessionId, question, datasetIds, apiKey, mode } = body;
 
   if (!sessionId || !question || !datasetIds?.length) {
     return NextResponse.json({ error: "sessionId, question, and datasetIds are required" }, { status: 400 });
@@ -64,6 +94,22 @@ export async function POST(req: NextRequest) {
   const trace: PipelineStep[] = [];
 
   try {
+    // ── RAG mode: retrieve, then let the model answer. Nothing below this
+    // branch runs for it; the deterministic pipeline is unchanged. ──────
+    if (mode === "rag" && process.env.NEXT_PUBLIC_ENABLE_RAG === "1") {
+      trace.push({
+        id: "input",
+        label: "Question received (RAG mode)",
+        status: "ok",
+        summary: `"${question}" against ${selected.length} dataset${selected.length === 1 ? "" : "s"} — answered from retrieved context, not computed`,
+        detail: selected.map((d) => `${d.name} — ${d.rowCount.toLocaleString()} rows, ${d.columns.length} columns`).join("; "),
+      });
+      for (const d of selected) await ensureDatasetRows(d);
+      const links: DatasetLink[] = session.relationships.map((r) => ({ datasetIdA: r.datasetIdA, datasetIdB: r.datasetIdB, columnA: r.columnA, columnB: r.columnB, cardinality: r.cardinality }));
+      const result = await answerWithRag(queryId, question, selected, links, apiKey, trace);
+      return NextResponse.json({ result });
+    }
+
     const preAmbiguity = detectColumnAmbiguity(question, selected, session.relationships);
 
     // A question that names a file the user left unticked (see scope.ts).
@@ -71,6 +117,12 @@ export async function POST(req: NextRequest) {
     const scopeWarnings = unselectedMentioned.length > 0
       ? [`The question mentions ${unselectedMentioned.map((n) => `"${n}"`).join(" and ")}, which is uploaded but not selected for this query — the answer below was produced without it. Tick it in the file picker and ask again.`]
       : [];
+    // A request to change data. Nothing here can write to a file, so say so
+    // plainly and answer the reading of the question that CAN be served
+    // (the rows it describes) rather than pretending something was changed.
+    if (isMutationRequest(question)) {
+      scopeWarnings.push("DataLens is read-only: it cannot delete, update or add records, and nothing in your files was changed. The rows that match the description are shown instead.");
+    }
 
     trace.push({
       id: "input",
@@ -164,7 +216,38 @@ export async function POST(req: NextRequest) {
       mergeDimensionCount = 0;
       const attemptTag = attempts === 1 ? "" : ` (attempt ${attempts})`;
       try {
-        const out = await planSelection(question, plannerDatasets, session.relationships, semanticModel, preAmbiguity, apiKey, planTrace, feedback, link);
+        let out = await planSelection(question, plannerDatasets, session.relationships, semanticModel, preAmbiguity, apiKey, planTrace, feedback, link);
+        // Consensus: a second independent draft on the first attempt of a
+        // cross-file question; reconcile when the two compute different things.
+        if (out.kind === "selection" && attempts === 1 && PLAN_CONSENSUS && selected.length >= 2) {
+          const secondTrace: LlmCallTrace = {};
+          try {
+            const second = await planSelection(question, plannerDatasets, session.relationships, semanticModel, preAmbiguity, apiKey, secondTrace, SECOND_OPINION, link);
+            if (second.kind === "selection") {
+              const agree = selectionSignature(second.selection) === selectionSignature(out.selection);
+              if (agree) {
+                trace.push({ id: "consensus", label: "Second independent draft agrees", status: "ok", summary: `${secondTrace.model ?? "the model"} produced the same computation independently — accepted with confidence`, ms: secondTrace.ms });
+              } else {
+                const reconcileTrace: LlmCallTrace = {};
+                const final = await planSelection(question, plannerDatasets, session.relationships, semanticModel, preAmbiguity, apiKey, reconcileTrace, reconcilePrompt(out.selection, second.selection), link);
+                trace.push({
+                  id: "consensus",
+                  label: "Second draft differed — reconciled",
+                  status: "warn",
+                  summary: `Two drafts computed different things; ${reconcileTrace.model ?? "the model"} reconciled them${final.kind === "selection" ? "" : " (reconciliation failed; first draft kept)"}`,
+                  detail: `Draft A: ${JSON.stringify(out.selection)}\nDraft B: ${JSON.stringify(second.selection)}`,
+                  payload: final.kind === "selection" ? final.selection : undefined,
+                  payloadLabel: "Reconciled selection",
+                  ms: (secondTrace.ms ?? 0) + (reconcileTrace.ms ?? 0),
+                });
+                if (final.kind === "selection") { out = final; planTrace.rawResponse = reconcileTrace.rawResponse ?? planTrace.rawResponse; planTrace.model = reconcileTrace.model ?? planTrace.model; }
+              }
+            }
+          } catch (err) {
+            // A failed second opinion never costs the answer: the first draft stands.
+            trace.push({ id: "consensus", label: "Second draft unavailable", status: "skipped", summary: `Could not obtain a second draft (${err instanceof Error ? err.message.slice(0, 120) : "error"}); the first draft stands.` });
+          }
+        }
         if (out.kind === "selection") {
           rawSelection = out.selection;
           const compiled = compileSelection(out.selection, semanticModel);
@@ -293,6 +376,8 @@ export async function POST(req: NextRequest) {
           ...compileExcluded,
         ],
         nameOf,
+        datasets: plannerDatasets,
+        longFormats: semanticModel.longFormats,
         ...(rawSelection ? { aliasOf } : {}),
       });
       if (!firstAttempt) firstAttempt = { plan, repairs, assessment };
@@ -361,6 +446,16 @@ export async function POST(req: NextRequest) {
     const byId = new Map(selected.map((d) => [d.id, d]));
 
     const joinWarnings: string[] = [];
+    // A statistic over a table that grades its own rows (a QC flag column)
+    // includes every grade unless the plan filters on it — say so.
+    if (plan.aggregations?.some((a) => a.fn !== "count" && a.fn !== "countDistinct")) {
+      const planTables = new Set([plan.datasetId, ...(plan.joins ?? []).map((j) => j.datasetId)]);
+      const filteredCols = new Set((plan.filters ?? []).map((f) => f.column));
+      for (const q of semanticModel.qualityFlags) {
+        if (!planTables.has(q.datasetId) || filteredCols.has(q.column)) continue;
+        joinWarnings.push(`Note: "${nameOf(q.datasetId)}" grades its rows with "${q.column}" (${q.values.join(" | ")}); this figure includes rows of every grade. Ask for a specific ${q.column} if only validated rows should count.`);
+      }
+    }
     const joinSteps: string[] = [];
     const planColumnRefs = new Set(referencedColumns(plan));
     // Which joins genuinely did not run. Tracked explicitly because the
@@ -397,6 +492,11 @@ export async function POST(req: NextRequest) {
           joinSteps.push(
             `  ↳ one-to-many: a single row matched up to ${stats.maxMatchesPerBaseRow} rows in "${joinDataset.name}"`
           );
+        }
+        if (stats.duplicateKeysDropped) {
+          const n = stats.duplicateKeysDropped;
+          joinSteps.push(`  ↳ "${joinDataset.name}" repeats ${n} ${rightKey} value${n === 1 ? "" : "s"} that should be unique; the first row of each was used so nothing is counted twice`);
+          joinWarnings.push(`Note: "${joinDataset.name}" contains ${n} duplicated ${rightKey} record${n === 1 ? "" : "s"}; only the first occurrence was used in the join, so figures are not double-counted.`);
         }
         if (stats.unmatchedBaseRows > 0) {
           joinSteps.push(
@@ -616,7 +716,33 @@ export async function POST(req: NextRequest) {
         pandasExtra += "\n\n# ── second fact table, aggregated separately ──\n" + planToPandas(v.plan, selected.map((d) => ({ id: d.id, name: d.name }))).replace(/^import pandas as pd\n+/, "").replace(/\bresult\b/g, `result_${subBase.name.replace(/[^a-zA-Z0-9]+/g, "_")}`);
       }
       const merged = mergeAggregatedResults(parts, mergeDimensionCount);
-      execution = { ...execution, columns: merged.columns, rows: merged.rows };
+      // A "having" over columns that only exist once the parts sit side by
+      // side ("actual at least target") is applied here, on the merged rows.
+      let mergedRows = merged.rows;
+      for (const h of plan.having ?? []) {
+        if (!merged.columns.includes(h.column) || (h.compareTo && !merged.columns.includes(h.compareTo))) continue;
+        const before = mergedRows.length;
+        mergedRows = mergedRows.filter((row) => {
+          const cell = row[h.column]; const other = h.compareTo ? row[h.compareTo] : h.value;
+          if (typeof cell !== "number" || (h.compareTo && typeof other !== "number")) return false;
+          const v = Number(other);
+          return h.op === "gt" ? cell > v : h.op === "gte" ? cell >= v : h.op === "lt" ? cell < v : h.op === "lte" ? cell <= v : h.op === "neq" ? cell !== v : cell === v;
+        });
+        if (mergedRows.length !== before) joinWarnings.push(`Kept ${mergedRows.length} of ${before} merged rows where ${h.column} ${h.op} ${h.compareTo ?? h.value}.`);
+      }
+      execution = { ...execution, columns: merged.columns, rows: mergedRows };
+      // A correlation between measures of DIFFERENT tables only exists once
+      // they sit side by side — compute it here, on the merged rows.
+      const corr = plan.correlate;
+      if (corr && !execution.correlation && merged.columns.includes(corr.columnX) && merged.columns.includes(corr.columnY)) {
+        const r = computePearsonCorrelation(merged.rows, corr.columnX, corr.columnY);
+        if (r) execution = {
+          ...execution,
+          correlation: { columnX: corr.columnX, columnY: corr.columnY, coefficient: r.coefficient, sampleSize: r.sampleSize, interpretation: interpretCorrelation(r.coefficient) },
+          // The sub-plan could not see the other table's measure; the merge could.
+          warnings: execution.warnings.filter((w) => !/Could not compute correlation/.test(w)),
+        };
+      }
       trace.push({
         id: "merge",
         label: "Fact tables aggregated separately and merged",
@@ -730,6 +856,27 @@ export async function POST(req: NextRequest) {
           ].filter(Boolean).join("\n"),
       ms: explainTrace.ms,
     });
+
+    // A grouped result with one dimension and a numeric measure is a chart
+    // whether or not the model asked for one: a bar per category, a line
+    // when the dimension is a date bucket. Lists, scalars and raw rows are
+    // left alone. Recorded as a repair so the trace says it was a default.
+    // Two grouping columns count as one dimension when the second is the
+    // first's readable label (an id and its name have the same groups).
+    const groupDims = plan.groupBy ?? [];
+    const oneDimension = groupDims.length === 1 || (groupDims.length === 2 && execution.rows.length === new Set(execution.rows.map((r) => String(r[groupDims[0]]))).size);
+    if ((!plan.chartType || plan.chartType === "none") && oneDimension && execution.rows.length >= 2 && execution.rows.length <= 40) {
+      // Chart the readable column when there is one (a name over an id).
+      const dim = groupDims.length === 2 && execution.rows.every((r) => typeof r[groupDims[1]] === "string") ? groupDims[1] : groupDims[0];
+      const measure = execution.columns.find((c) => !groupDims.includes(c) && execution.rows.every((r) => typeof r[c] === "number"));
+      if (measure) {
+        const isTime = plan.dateBucket?.as === dim || plan.dateBucket?.column === dim || execution.rows.every((r) => /^\d{4}(-\d{2})?/.test(String(r[dim] ?? "")));
+        plan.chartType = isTime ? "line" : "bar";
+        plan.chartX = dim;
+        plan.chartY = [measure];
+        repairs.push({ field: "chartType", detail: `Added a ${plan.chartType} chart of "${measure}" by "${dim}" — the model asked for none, but a grouped result with one dimension is a chart.` });
+      }
+    }
 
     const chartData: ChartDataPoint[] | undefined =
       plan.chartType && plan.chartType !== "none" && plan.chartX

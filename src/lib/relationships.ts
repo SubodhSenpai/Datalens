@@ -30,6 +30,12 @@ interface ColumnProfile {
   unique: boolean;
 }
 
+function isFractional(p: ColumnProfile): boolean {
+  if (p.column.type !== "number") return false;
+  for (const k of p.keys) if (k.startsWith("n:") && k.includes(".")) return true;
+  return false;
+}
+
 function profileColumn(rows: Record<string, unknown>[], column: ColumnSchema): ColumnProfile {
   const keys = new Set<string>();
   let presentCount = 0;
@@ -158,6 +164,10 @@ export async function detectRelationships(datasets: DatasetRecord[]): Promise<Re
           // decision made from the graph.
           const looksLikeKey = pa.unique || pb.unique || (pa.keys.size >= MIN_KEY_CARDINALITY && pb.keys.size >= MIN_KEY_CARDINALITY);
           if (!looksLikeKey) continue;
+          // A column holding fractional numbers is a measure (an amount, a
+          // rate), never an identifier — two files sharing such values
+          // (a receipt equal to its bill) is coincidence, not a key.
+          if (isFractional(pa) || isFractional(pb)) continue;
 
           const cardinality = cardinalityOf(pa.unique, pb.unique);
           // The parent is the side holding each key once — the table the

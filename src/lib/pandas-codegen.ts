@@ -27,8 +27,14 @@ const OP_TO_PANDAS: Record<string, string> = {
 // differently. Emitting "avg" here would print code that raises at runtime,
 // which defeats the point of showing it.
 const AGG_TO_PANDAS: Record<string, string> = {
-  sum: "sum", avg: "mean", count: "count", countDistinct: "nunique", min: "min", max: "max",
+  sum: "sum", avg: "mean", median: "median", count: "count", countDistinct: "nunique", min: "min", max: "max",
 };
+
+// A conditional aggregate is expressed as a masked column: the value where
+// the condition holds, NaN elsewhere, so the plain aggregate skips the rest.
+function conditionMask(base: string, where: { column: string; op: string; value: unknown; compareTo?: string }[]): string {
+  return where.map((f) => `(${base}[${JSON.stringify(f.column)}] ${OP_TO_PANDAS[f.op] ?? "=="} ${f.compareTo ? `${base}[${JSON.stringify(f.compareTo)}]` : JSON.stringify(f.value)})`).join(" & ");
+}
 
 /**
  * Renders the executed QueryPlan as the equivalent pandas code.
@@ -79,6 +85,8 @@ export function planToPandas(plan: QueryPlan, datasets: PandasDatasetName[]): st
       lines.push(`${base} = ${base}[${base}[${quote(f.column)}].notna()]`);
     } else if (f.op === "contains") {
       lines.push(`${base} = ${base}[${base}[${quote(f.column)}].astype(str).str.contains(${quote(String(f.value))}, case=False, na=False)]`);
+    } else if (f.compareTo) {
+      lines.push(`${base} = ${base}[${base}[${quote(f.column)}] ${OP_TO_PANDAS[f.op] ?? "=="} ${base}[${quote(f.compareTo)}]]`);
     } else {
       lines.push(`${base} = ${base}[${base}[${quote(f.column)}] ${OP_TO_PANDAS[f.op] ?? "=="} ${quote(Array.isArray(f.value) ? f.value.join(",") : f.value)}]`);
     }
@@ -97,8 +105,16 @@ export function planToPandas(plan: QueryPlan, datasets: PandasDatasetName[]): st
   let result = base;
 
   if (hasGroup || hasAgg) {
+    // Conditional aggregates read a masked copy of their column.
+    const source = new Map<string, string>();
+    for (const a of plan.aggregations ?? []) {
+      if (!a.where?.length) continue;
+      const masked = `${a.as ?? `${a.fn}_${a.column}`}__src`;
+      lines.push(`${base}[${quote(masked)}] = ${base}[${quote(a.column)}].where(${conditionMask(base, a.where)})`);
+      source.set(a.as ?? `${a.fn}_${a.column}`, masked);
+    }
     const aggPairs = (plan.aggregations ?? []).map(
-      (a) => `    ${a.as ?? `${a.fn}_${a.column}`}=(${quote(a.column)}, ${quote(AGG_TO_PANDAS[a.fn] ?? a.fn)}),`
+      (a) => `    ${a.as ?? `${a.fn}_${a.column}`}=(${quote(source.get(a.as ?? `${a.fn}_${a.column}`) ?? a.column)}, ${quote(AGG_TO_PANDAS[a.fn] ?? a.fn)}),`
     );
     if (hasGroup) {
       const keys = plan.groupBy!.map(quote).join(", ");

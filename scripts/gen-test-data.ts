@@ -22,7 +22,7 @@ const dateBetween = (start: string, end: string) => {
   return new Date(s + rand() * (e - s)).toISOString().slice(0, 10);
 };
 
-const OUT_ROOT = path.resolve(__dirname, "..", "..", "test-data");
+const OUT_ROOT = path.resolve(__dirname, "..", "test-data");
 const CSV_DIR = path.join(OUT_ROOT, "csv");
 const XLSX_DIR = path.join(OUT_ROOT, "xlsx");
 fs.mkdirSync(CSV_DIR, { recursive: true });

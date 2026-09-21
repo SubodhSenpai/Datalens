@@ -3,7 +3,7 @@ import * as path from "path";
 import * as XLSX from "xlsx";
 
 const BASE_URL = "http://localhost:3000";
-const TEST_DATA_ROOT = path.resolve(__dirname, "..", "..", "test-data");
+const TEST_DATA_ROOT = path.resolve(__dirname, "..", "test-data");
 const REPORT_PATH = path.join(TEST_DATA_ROOT, "test-scenarios.xlsx");
 
 interface SessionGroup {

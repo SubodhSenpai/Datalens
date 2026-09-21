@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useRef, useEffect, useSyncExternalStore } from "react";
-import { KeyRound, Check, X, ExternalLink } from "lucide-react";
+import { KeyRound, Check, X, ExternalLink, Sparkles } from "lucide-react";
+import { PROVIDERS, detectProvider } from "@/lib/providers";
 
 const STORAGE_KEY = "datalens_openrouter_api_key";
 
@@ -24,11 +25,11 @@ interface ApiKeySettingsProps {
   onChange: (key: string) => void;
 }
 
-// Lets each visitor bring their own OpenRouter key instead of relying on one
-// committed to the deployment — the key lives ONLY in this browser
+// Lets each visitor bring their own key — OpenRouter or Google Gemini, told
+// apart by the key's shape (see providers.ts) — instead of relying on one
+// committed to the deployment. The key lives ONLY in this browser
 // (localStorage) and is sent with each query request; the server never
-// stores it. Needed because a public deployment has no server-side key
-// checked into the repo for everyone to share.
+// stores it.
 export default function ApiKeySettings({ value, onChange }: ApiKeySettingsProps) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -80,6 +81,8 @@ export default function ApiKeySettings({ value, onChange }: ApiKeySettingsProps)
   // localStorage being unavailable during SSR.
   const displayValue = hasMounted ? value : "";
   const masked = displayValue ? `${displayValue.slice(0, 7)}…${displayValue.slice(-4)}` : "";
+  const saved = displayValue ? detectProvider(displayValue) : null;
+  const typed = draft.trim() ? detectProvider(draft) : null;
 
   return (
     <div className="relative px-4 py-3 border-b-2 border-ink">
@@ -91,8 +94,8 @@ export default function ApiKeySettings({ value, onChange }: ApiKeySettingsProps)
         <span className="flex items-center gap-1.5 text-[11px] font-bold text-text-secondary uppercase tracking-widest">
           <KeyRound size={12} /> API key
         </span>
-        <span className={`badge text-[11px] ${displayValue ? "badge-emerald" : "badge-amber"}`}>
-          {displayValue ? masked : "Not set"}
+        <span className={`badge text-[11px] ${displayValue ? "badge-emerald" : "badge-amber"}`} title={saved ? `${PROVIDERS[saved.id].label} key` : undefined}>
+          {displayValue ? `${PROVIDERS[saved!.id].label} · ${masked}` : "Not set"}
         </span>
       </button>
 
@@ -102,7 +105,7 @@ export default function ApiKeySettings({ value, onChange }: ApiKeySettingsProps)
           className="glass-card absolute left-4 right-4 top-full mt-2 z-30 p-4 bg-bg-card animate-[fadeIn_0.15s_ease_forwards]"
         >
           <p className="text-[12px] font-medium text-text-secondary leading-relaxed mb-3">
-            Bring your own OpenRouter key for this browser. It&apos;s stored only in your{" "}
+            Bring your own key for this browser — OpenRouter or Google Gemini; the provider is recognised from the key itself. It&apos;s stored only in your{" "}
             <code className="font-mono">localStorage</code> and sent with each query — never saved on the server.
           </p>
           <input
@@ -110,12 +113,20 @@ export default function ApiKeySettings({ value, onChange }: ApiKeySettingsProps)
             type="password"
             autoComplete="off"
             spellCheck={false}
-            placeholder="sk-or-v1-..."
+            placeholder={`${PROVIDERS.openrouter.keyHint}  or  ${PROVIDERS.gemini.keyHint}`}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && save()}
-            className="w-full px-3 py-2 mb-3 text-[13px] font-mono bg-bg-surface border-2 border-ink rounded-xl outline-none focus:bg-mint/20"
+            className="w-full px-3 py-2 mb-1 text-[13px] font-mono bg-bg-surface border-2 border-ink rounded-xl outline-none focus:bg-mint/20"
           />
+          <p id="api-key-provider" className={`flex items-center gap-1 mb-3 text-[11px] font-semibold ${typed ? (typed.recognised ? "text-sage-dark" : "text-mustard-dark") : "text-text-muted"}`}>
+            <Sparkles size={11} />
+            {typed
+              ? typed.recognised
+                ? `${PROVIDERS[typed.id].label} key recognised — models: ${PROVIDERS[typed.id].models.slice(0, 2).join(", ")}, …`
+                : "Key shape not recognised — it will be sent to OpenRouter"
+              : "Paste a key to see which provider it belongs to"}
+          </p>
           <div className="flex items-center gap-2">
             <button id="api-key-save" onClick={save} className="btn-primary flex-1 justify-center py-1.5 text-[13px]">
               <Check size={13} /> Save
@@ -126,14 +137,19 @@ export default function ApiKeySettings({ value, onChange }: ApiKeySettingsProps)
               </button>
             )}
           </div>
-          <a
-            href="https://openrouter.ai/keys"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-1 mt-3 text-[11px] font-semibold text-text-secondary hover:text-ink"
-          >
-            Get a free key at openrouter.ai <ExternalLink size={10} />
-          </a>
+          <div className="flex items-center gap-3 mt-3">
+            {(["openrouter", "gemini"] as const).map((id) => (
+              <a
+                key={id}
+                href={PROVIDERS[id].keysUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 text-[11px] font-semibold text-text-secondary hover:text-ink"
+              >
+                {PROVIDERS[id].label} key <ExternalLink size={10} />
+              </a>
+            ))}
+          </div>
         </div>
       )}
     </div>

@@ -9,7 +9,7 @@ import * as XLSX from "xlsx";
 // reports — the app's own numbers are never trusted as the reference.
 
 const BASE_URL = "http://localhost:3000";
-const VALID_DIR = path.resolve(__dirname, "..", "..", "test-data", "validation");
+const VALID_DIR = path.resolve(__dirname, "..", "test-data", "validation");
 const RUNS = Number(process.env.RUNS ?? 1);
 const TOLERANCE = 0.015;
 
@@ -313,7 +313,10 @@ async function main() {
   console.log(`Validation suite — ${CASES.length} questions x ${RUNS} run(s)\n`);
   const results: { c: Case; pass: boolean; reason: string; source?: unknown }[] = [];
 
+  // ONLY=1.3,2.7 re-runs just those ids.
+  const only = (process.env.ONLY ?? "").split(",").map((x) => x.trim()).filter(Boolean);
   for (const c of CASES) {
+    if (only.length && !only.includes(c.id)) continue;
     let bestPass = false, bestReason = "";
     let source: unknown;
     for (let attempt = 1; attempt <= RUNS; attempt++) {

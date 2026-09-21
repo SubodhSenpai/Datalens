@@ -1,14 +1,42 @@
 "use client";
 
-import { useState, useRef, useMemo, KeyboardEvent } from "react";
-import { Send, ChevronDown, Database, Sparkles } from "lucide-react";
-import { DatasetFile } from "@/lib/types";
+import { useState, useRef, useMemo, useSyncExternalStore, KeyboardEvent } from "react";
+import { Send, ChevronDown, Database, Sparkles, Calculator, BookOpenText } from "lucide-react";
+import { DatasetFile, QueryMode } from "@/lib/types";
 
 interface QueryInputProps {
   datasets: DatasetFile[];
   isQuerying: boolean;
-  onQuery: (question: string, selectedIds: string[]) => void;
+  onQuery: (question: string, selectedIds: string[], mode: QueryMode) => void;
 }
+
+const MODE_STORAGE_KEY = "datalens_query_mode";
+// NEXT_PUBLIC_ENABLE_RAG=1 shows the mode toggle. Off by default: the RAG
+// path is unverified on wide, long-format data and must not be mistaken
+// for the computed answers.
+const RAG_ENABLED = process.env.NEXT_PUBLIC_ENABLE_RAG === "1";
+
+// The saved mode lives in localStorage, which only the browser has. Read it
+// through useSyncExternalStore so the server render and the first client
+// render agree (server: default), with no setState-in-effect cascade.
+const modeListeners = new Set<() => void>();
+const subscribeMode = (cb: () => void) => { modeListeners.add(cb); return () => { modeListeners.delete(cb); }; };
+const readSavedMode = (): QueryMode => {
+  if (!RAG_ENABLED) return "deterministic";
+  try {
+    const saved = window.localStorage.getItem(MODE_STORAGE_KEY);
+    return saved === "rag" ? "rag" : "deterministic";
+  } catch { return "deterministic"; }
+};
+const saveMode = (m: QueryMode) => {
+  try { window.localStorage.setItem(MODE_STORAGE_KEY, m); } catch { /* storage unavailable */ }
+  modeListeners.forEach((cb) => cb());
+};
+
+const MODES: { id: QueryMode; label: string; icon: React.ReactNode; hint: string }[] = [
+  { id: "deterministic", label: "Deterministic", icon: <Calculator size={11} />, hint: "The model writes a query plan; the engine computes every number. Verified, traceable, slower." },
+  { id: "rag", label: "RAG", icon: <BookOpenText size={11} />, hint: "The rows and statistics most relevant to the question are retrieved and the model answers directly. Flexible and fast, but not verified — the answer is the model's reading of a sample." },
+];
 
 const EXAMPLE_QUESTIONS = [
   "Top 10 by value",
@@ -32,12 +60,15 @@ export default function QueryInput({ datasets, isQuerying, onQuery }: QueryInput
   );
   const [showDatasetPicker, setShowDatasetPicker] = useState(false);
   const [showExamples, setShowExamples]     = useState(false);
+  // Deterministic unless the user chose otherwise; remembered per browser.
+  const mode = useSyncExternalStore(subscribeMode, readSavedMode, () => "deterministic" as QueryMode);
+  const chooseMode = saveMode;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleSubmit = () => {
     const q = question.trim();
     if (!q || isQuerying || selectedIds.length === 0) return;
-    onQuery(q, selectedIds);
+    onQuery(q, selectedIds, mode);
     setQuestion("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
   };
@@ -104,7 +135,33 @@ export default function QueryInput({ datasets, isQuerying, onQuery }: QueryInput
         >
           <Sparkles size={11} /> Ideas
         </button>
+
+        {/* Answer mode — the RAG path is experimental: it reads well on
+            narrow data and badly on long-format data, so it is only offered
+            when explicitly enabled. */}
+        {RAG_ENABLED && (
+        <div className="ml-auto inline-flex items-center rounded-full border-2 border-ink bg-bg-card p-0.5" role="radiogroup" aria-label="Answer mode">
+          {MODES.map((m) => (
+            <button
+              key={m.id}
+              id={`mode-${m.id}`}
+              role="radio"
+              aria-checked={mode === m.id}
+              title={m.hint}
+              onClick={() => chooseMode(m.id)}
+              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold transition-all ${mode === m.id ? "bg-ink text-bg-card" : "hover:bg-mint"}`}
+            >
+              {m.icon} {m.label}
+            </button>
+          ))}
+        </div>
+        )}
       </div>
+      {mode === "rag" && (
+        <p className="text-[11px] text-text-secondary font-medium -mt-1">
+          RAG mode: the answer is written by the model from retrieved rows and column statistics — it is not computed or verified. Use Deterministic for exact figures.
+        </p>
+      )}
 
       {/* Example pills */}
       {showExamples && (

@@ -15,7 +15,7 @@ import { parseCSVBuffer, parseXLSXBuffer } from "../src/lib/parse";
 import { detectRelationships } from "../src/lib/relationships";
 import type { DatasetRecord } from "../src/lib/session-store";
 
-const DIR = path.resolve(__dirname, "../../test-data/validation");
+const DIR = path.resolve(__dirname, "../test-data/validation");
 
 function load(file: string): DatasetRecord[] {
   const buf = fs.readFileSync(path.join(DIR, file));

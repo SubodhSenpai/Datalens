@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useRef } from "react";
 import { Upload, FileSpreadsheet, X, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
-import { DatasetFile } from "@/lib/types";
+import { DatasetFile, DatasetLink } from "@/lib/types";
 import { validateFile, formatBytes } from "@/lib/utils";
 import { MAX_FILES, MAX_SESSION_SIZE_MB } from "@/lib/types";
 
@@ -10,7 +10,7 @@ interface FileUploadProps {
   sessionId: string;
   existingCount: number;
   existingSize: number;
-  onUploaded: (datasets: DatasetFile[]) => void;
+  onUploaded: (datasets: DatasetFile[], links: DatasetLink[]) => void;
   onCancel: () => void;
   inline?: boolean;
 }
@@ -90,7 +90,7 @@ export default function FileUpload({ sessionId, existingCount, existingSize, onU
         setPendingFiles([]);
       }
 
-      if (uploaded.length > 0) onUploaded(uploaded);
+      if (uploaded.length > 0) onUploaded(uploaded, (data.links ?? []) as DatasetLink[]);
     } catch {
       setSubmitError("Upload failed. Check your connection and try again.");
     } finally {

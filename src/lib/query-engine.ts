@@ -47,7 +47,17 @@ export interface JoinStats {
    * to it gets the base's column — worth saying out loud.
    */
   collidedColumns: { column: string; renamedTo: string }[];
+  /**
+   * Joined-side rows ignored because they repeated a key that is otherwise
+   * unique in that file (a duplicated record in a lookup table). Without
+   * this, one duplicated record doubles every figure joined through it.
+   */
+  duplicateKeysDropped?: number;
 }
+
+// A joined side whose key is distinct on at least this share of its rows is
+// a lookup table with a few duplicated records, not a genuine one-to-many.
+const LOOKUP_UNIQUENESS = 0.9;
 
 // Inner/left join of two row sets on (possibly differently-named) key
 // columns, prefixing the joined dataset's non-key columns to avoid
@@ -79,11 +89,25 @@ export function joinRows(
   // not an identity and is excluded from the index entirely, so those rows
   // cannot all collapse onto one another.
   const index = new Map<string, Record<string, unknown>[]>();
+  let keyed = 0;
   for (const row of otherRows) {
     const key = normalizeKey(row[rightKey]);
     if (key === null) continue;
+    keyed++;
     const bucket = index.get(key);
     if (bucket) bucket.push(row); else index.set(key, [row]);
+  }
+
+  // A lookup table (one row per key) that carries a handful of duplicated
+  // records would otherwise fan every matching base row out — a customer
+  // listed twice makes each of its orders count twice. Keep the first row
+  // per key when the key is unique on ≥90% of rows but not all; a genuinely
+  // one-to-many side (well under 90%) is left intact.
+  let duplicatesDropped = 0;
+  if (keyed > 0 && index.size < keyed && index.size >= keyed * LOOKUP_UNIQUENESS) {
+    for (const [key, bucket] of index) {
+      if (bucket.length > 1) { duplicatesDropped += bucket.length - 1; index.set(key, [bucket[0]]); }
+    }
   }
 
   const prefix = joinPrefix(joinDatasetName);
@@ -128,6 +152,7 @@ export function joinRows(
     stats.unmatchedBaseRows = unmatched;
     stats.maxMatchesPerBaseRow = maxMatches;
     stats.collidedColumns = collided;
+    stats.duplicateKeysDropped = duplicatesDropped;
   }
   return out;
 }
@@ -138,6 +163,7 @@ export function computePearsonCorrelation(
   columnY: string
 ): { coefficient: number; sampleSize: number } | null {
   const pairs = rows
+    .filter((r) => !isBlankCell(r[columnX]) && !isBlankCell(r[columnY]))
     .map((r): [number, number] => [Number(r[columnX]), Number(r[columnY])])
     .filter(([x, y]) => !Number.isNaN(x) && !Number.isNaN(y));
 
@@ -162,7 +188,7 @@ export function computePearsonCorrelation(
   return { coefficient: round(numerator / Math.sqrt(denomX * denomY)), sampleSize: n };
 }
 
-function interpretCorrelation(r: number): string {
+export function interpretCorrelation(r: number): string {
   const abs = Math.abs(r);
   const strength = abs >= 0.7 ? "strong" : abs >= 0.4 ? "moderate" : abs >= 0.2 ? "weak" : "negligible";
   const direction = r > 0.001 ? "positive" : r < -0.001 ? "negative" : "no";
@@ -310,7 +336,17 @@ export function executeQueryPlan(rows: Record<string, unknown>[], plan: QueryPla
   const warnings: string[] = [];
 
   let working = plan.dateBucket ? applyDateBucket(rows, plan.dateBucket) : rows;
-  if (plan.derive?.length) working = applyDerive(working, plan.derive, warnings);
+  // A derive that names an aggregate's output ("share = exceeded / total")
+  // can only run once the aggregates exist; it is held back until then.
+  const sourceCols = new Set(working.length > 0 ? Object.keys(working[0]) : []);
+  const producedNames = new Set((plan.aggregations ?? []).map((a) => a.as ?? `${a.fn}_${a.column}`));
+  const isPost = (d: QueryDerivedColumn) => {
+    const ids = d.expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [];
+    return ids.some((id) => producedNames.has(id) && !sourceCols.has(id));
+  };
+  const preDerive = (plan.derive ?? []).filter((d) => !isPost(d));
+  const postDerive = (plan.derive ?? []).filter(isPost);
+  if (preDerive.length) working = applyDerive(working, preDerive, warnings);
   const availableColumns = working.length > 0 ? Object.keys(working[0]) : [];
 
   if (plan.filters?.length) {
@@ -319,12 +355,17 @@ export function executeQueryPlan(rows: Record<string, unknown>[], plan: QueryPla
         warnings.push(`Ignored filter on unknown column "${f.column}".`);
         continue;
       }
-      working = working.filter((row) => applyFilter(row[f.column], f));
+      working = working.filter((row) => (f.compareTo ? applyFilter(row[f.column], { ...f, value: row[f.compareTo!] as number | string }) : applyFilter(row[f.column], f)));
     }
   }
 
   let correlation: ExecutionResult["correlation"];
-  if (plan.correlate) {
+  // A correlation over columns the aggregation PRODUCES ("annual pay" vs
+  // "average rating per person") is computed on the grouped rows below;
+  // one over raw columns is computed here, before grouping.
+  const wantsGroupedCorrelation = Boolean(plan.correlate && (plan.groupBy?.length || plan.aggregations?.length)
+    && (!availableColumns.includes(plan.correlate.columnX) || !availableColumns.includes(plan.correlate.columnY)));
+  if (plan.correlate && !wantsGroupedCorrelation) {
     const { columnX, columnY } = plan.correlate;
     if (!availableColumns.includes(columnX) || !availableColumns.includes(columnY)) {
       warnings.push(`Could not compute correlation — "${columnX}" or "${columnY}" doesn't exist.`);
@@ -351,15 +392,26 @@ export function executeQueryPlan(rows: Record<string, unknown>[], plan: QueryPla
     }
 
     const grouped = groupRows(working, groupCols);
+    // Blanks skipped per aggregate, so the answer can say "over 1,929 rated
+    // rows; 471 blank" instead of presenting an average as if every row had
+    // a value.
+    const skipped = new Map<string, number>();
     resultRows = Object.entries(grouped).map(([, groupRows]) => {
       const out: Record<string, unknown> = {};
       groupCols.forEach((c) => { out[c] = groupRows[0][c]; });
       for (const agg of aggs) {
         out[agg.as ?? `${agg.fn}_${agg.column}`] = computeAggregate(groupRows, agg);
+        if (agg.fn !== "count" || (agg.column !== "*" && agg.column !== "")) {
+          const label = `${agg.fn}(${agg.column})`;
+          skipped.set(label, (skipped.get(label) ?? 0) + blankCount(groupRows, agg.column));
+        }
       }
       if (aggs.length === 0) out["count"] = groupRows.length;
       return out;
     });
+    for (const [label, n] of skipped) {
+      if (n > 0) warnings.push(`${label}: ${n.toLocaleString("en-US")} blank cell${n === 1 ? "" : "s"} excluded (${(working.length - n).toLocaleString("en-US")} of ${working.length.toLocaleString("en-US")} rows had a value).`);
+    }
 
     // HAVING: filter the GROUPS by their aggregate values. Runs here, after
     // aggregation, because these conditions are about the group as a whole
@@ -371,11 +423,26 @@ export function executeQueryPlan(rows: Record<string, unknown>[], plan: QueryPla
           warnings.push(`Ignored "having" on "${h.column}" — the grouped result has no such column.`);
           continue;
         }
-        resultRows = resultRows.filter((row) => applyFilter(row[h.column], h));
+        if (h.compareTo && !producedColumns.has(h.compareTo)) { warnings.push(`Ignored "having" comparing "${h.column}" with "${h.compareTo}" — the grouped result has no such column.`); continue; }
+        resultRows = resultRows.filter((row) => (h.compareTo ? applyFilter(row[h.column], { ...h, value: row[h.compareTo!] as number | string }) : applyFilter(row[h.column], h)));
       }
     }
 
+    if (postDerive.length && resultRows.length) {
+      resultRows = applyDerive(resultRows, postDerive, warnings);
+    }
     resultColumns = resultRows.length > 0 ? Object.keys(resultRows[0]) : [...groupCols];
+
+    if (plan.correlate && wantsGroupedCorrelation) {
+      const { columnX, columnY } = plan.correlate;
+      if (!resultColumns.includes(columnX) || !resultColumns.includes(columnY)) {
+        warnings.push(`Could not compute correlation — "${columnX}" or "${columnY}" is neither a source column nor a grouped output.`);
+      } else {
+        const result = computePearsonCorrelation(resultRows, columnX, columnY);
+        if (!result) warnings.push(`Could not compute correlation between "${columnX}" and "${columnY}" — not enough numeric data.`);
+        else correlation = { columnX, columnY, coefficient: result.coefficient, sampleSize: result.sampleSize, interpretation: interpretCorrelation(result.coefficient) };
+      }
+    }
   } else {
     resultRows = working;
     resultColumns = availableColumns;
@@ -436,6 +503,14 @@ function applyFilter(cellValue: unknown, filter: QueryFilter): boolean {
     return op === "in" ? hit : !hit;
   }
   if (cellValue === null || cellValue === undefined) return op === "neq";
+  // A column-to-column comparison whose other side is blank has no answer.
+  if (filter.compareTo && (value === null || value === undefined || value === "")) return false;
+  // A yes/no column is loaded as true/false; a question says "Yes".
+  if (typeof cellValue === "boolean" && typeof value === "string") {
+    const v = value.trim().toLowerCase();
+    const wanted = ["yes", "true", "1", "y", "t"].includes(v) ? true : ["no", "false", "0", "n", "f"].includes(v) ? false : undefined;
+    if (wanted !== undefined) return op === "neq" ? cellValue !== wanted : op === "eq" ? cellValue === wanted : false;
+  }
 
   if (typeof cellValue === "number" && typeof value !== "boolean") {
     const num = Number(value);
@@ -499,8 +574,23 @@ function groupRows(rows: Record<string, unknown>[], groupCols: string[]): Record
   return groups;
 }
 
-function computeAggregate(rows: Record<string, unknown>[], agg: QueryAggregation): number {
-  if (agg.fn === "count") return rows.length;
+const isBlankCell = (v: unknown) => v === null || v === undefined || v === "";
+
+/** Blank cells an aggregate over `column` would skip — reported, never silently dropped. */
+function blankCount(rows: Record<string, unknown>[], column: string): number {
+  let n = 0;
+  for (const r of rows) if (isBlankCell(r[column])) n++;
+  return n;
+}
+
+function computeAggregate(allRows: Record<string, unknown>[], agg: QueryAggregation): number | null {
+  // A conditional aggregate sees only the rows meeting its own conditions.
+  const rows = agg.where?.length
+    ? allRows.filter((row) => agg.where!.every((f) => (f.compareTo ? applyFilter(row[f.column], { ...f, value: row[f.compareTo!] as number | string }) : applyFilter(row[f.column], f))))
+    : allRows;
+  // count(*) / count(row) counts rows; count(column) counts the cells that
+  // hold a value — a blank is not an occurrence.
+  if (agg.fn === "count") return agg.column === "*" || agg.column === "" ? rows.length : rows.length - blankCount(rows, agg.column);
   // Distinct count works on ANY column type (it's the only aggregate that
   // means something over strings), and is what "how many members" wants
   // when a table has several rows per member — plain count would report
@@ -520,10 +610,17 @@ function computeAggregate(rows: Record<string, unknown>[], agg: QueryAggregation
     .filter((v) => v !== null && v !== undefined && v !== "")
     .map((v) => Number(v))
     .filter((n) => !Number.isNaN(n));
-  if (nums.length === 0) return 0;
+  // No values at all is "no value", not zero — a zero would enter averages
+  // and correlations as a real observation.
+  if (nums.length === 0) return null;
   switch (agg.fn) {
     case "sum": return round(nums.reduce((a, b) => a + b, 0));
     case "avg": return round(nums.reduce((a, b) => a + b, 0) / nums.length);
+    case "median": {
+      const sorted = [...nums].sort((a, b) => a - b);
+      const mid = sorted.length >> 1;
+      return round(sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2);
+    }
     case "min": return round(Math.min(...nums));
     case "max": return round(Math.max(...nums));
   }

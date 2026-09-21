@@ -16,8 +16,8 @@ import { joinPrefix } from "./query-engine";
  * turns a set of field references into the plan that reaches them.
  */
 
-export interface SelectionMeasure { ref: string; fn: AggregateFn; as?: string }
-export interface SelectionFilter { ref: string; op: FilterOp; value?: string | number | boolean | (string | number)[] }
+export interface SelectionMeasure { ref: string; fn: AggregateFn; as?: string; /** conditions for this measure only (count-if, sum-if, "value where parameter is X") */ where?: SelectionFilter[] }
+export interface SelectionFilter { ref: string; op: FilterOp; value?: string | number | boolean | (string | number)[]; /** compare with another field instead of a constant */ valueRef?: string }
 
 export interface Selection {
   measures?: SelectionMeasure[];
@@ -28,7 +28,7 @@ export interface Selection {
   derive?: { as: string; expr: string }[];
   dateBucket?: { ref: string; granularity: "day" | "month" | "year"; as?: string };
   /** Applied after grouping, on measure aliases. */
-  having?: QueryFilter[];
+  having?: (QueryFilter & { /** compare with another measure alias instead of a constant */ valueRef?: string })[];
   /**
    * Anti-join: keep only base rows with NO match in these tables
    * ("members without loans"). Compiled to a left join + isNull.
@@ -85,6 +85,27 @@ export function looksLikeSelection(obj: unknown): obj is Selection {
 }
 
 interface Resolved { field: SemanticField; datasetId: string }
+
+/**
+ * What a selection COMPUTES, independent of how it labels or presents it:
+ * two drafts with the same signature answer the same question, whatever
+ * their "as" names, sort, limit, chart or reasoning say.
+ */
+export function selectionSignature(sel: Selection): string {
+  const low = (s: unknown) => String(s ?? "").toLowerCase();
+  const filt = (f: SelectionFilter) => `${low(f.ref)} ${f.op} ${f.valueRef ? "ref:" + low(f.valueRef) : JSON.stringify(f.value ?? null).toLowerCase()}`;
+  const sig = {
+    m: (sel.measures ?? []).map((m) => `${m.fn}(${low(m.ref)})${m.where?.length ? " where " + m.where.map(filt).sort().join(" & ") : ""}`).sort(),
+    d: (sel.dimensions ?? []).map(low).sort(),
+    f: (sel.filters ?? []).map(filt).sort(),
+    x: (sel.derive ?? []).map((d) => low(d.expr).replace(/\s+/g, "")).sort(),
+    h: (sel.having ?? []).map((h) => `${low(h.column)} ${h.op} ${h.valueRef ?? h.value}`).sort(),
+    w: (sel.without ?? []).map(low).sort(),
+    b: sel.dateBucket ? `${low(sel.dateBucket.ref)}:${sel.dateBucket.granularity}` : "",
+    c: sel.correlate ? `${low(sel.correlate.x)}~${low(sel.correlate.y)}` : "",
+  };
+  return JSON.stringify(sig);
+}
 
 export function compileSelection(sel: Selection, model: SemanticModel): CompiledSelection {
   // Which fact tables do the additive measures come from? One → the plain
@@ -181,9 +202,24 @@ function compileOne(sel: Selection, model: SemanticModel, opts: CompileOptions):
     if (lr && lr !== "derived") { dimensions.push({ d: labelRef, r: lr }); notes.push(`Added ${labelRef} alongside ${x.d} for readability.`); }
   }
   const filters = (sel.filters ?? []).map((f) => ({ f, r: resolve(f.ref, "filter") })).filter((x) => x.r);
+  const measureConditionRefs = (sel.measures ?? []).flatMap((m) => (m.where ?? []).flatMap((f) => [f.ref, ...(f.valueRef ? [f.valueRef] : [])])).map((ref) => ({ s: ref, r: resolve(ref, "measure condition") })).filter((x) => x.r);
+  // A filter comparing two fields needs both fields' tables.
+  const comparisonRefs = (sel.filters ?? []).filter((f) => f.valueRef).map((f) => ({ s: f.valueRef!, r: resolve(f.valueRef!, "filter comparison") })).filter((x) => x.r);
   const selects = (sel.select ?? []).map((s) => ({ s, r: resolve(s, "select") })).filter((x) => x.r);
+  // Same courtesy for a selected id: a "who" answered with ids alone is
+  // unreadable, and the label adds no rows.
+  for (const x of [...selects]) {
+    if (x.r === "derived" || !x.r?.field.isKey || !x.r.field.labelRef) continue;
+    const labelRef = x.r.field.labelRef;
+    if (selects.some((y) => y.s.toLowerCase() === labelRef.toLowerCase())) continue;
+    const lr = resolve(labelRef, "label");
+    if (lr && lr !== "derived") { selects.push({ s: labelRef, r: lr }); notes.push(`Added ${labelRef} alongside ${x.s} for readability.`); }
+  }
   const bucket = sel.dateBucket ? { b: sel.dateBucket, r: resolve(sel.dateBucket.ref, "dateBucket") } : undefined;
-  const corr = sel.correlate ? { x: resolve(sel.correlate.x, "correlate"), y: resolve(sel.correlate.y, "correlate") } : undefined;
+  const measureAliasSet = new Set((sel.measures ?? []).map((m) => m.as).filter((a): a is string => Boolean(a)));
+  const corr = sel.correlate
+    ? { x: measureAliasSet.has(sel.correlate.x) ? undefined : resolve(sel.correlate.x, "correlate"), y: measureAliasSet.has(sel.correlate.y) ? undefined : resolve(sel.correlate.y, "correlate") }
+    : undefined;
 
   // Measures anchor the base most strongly: the table whose rows are being
   // summed is the fact table, and everything else joins onto it.
@@ -191,6 +227,8 @@ function compileOne(sel: Selection, model: SemanticModel, opts: CompileOptions):
   for (const x of dimensions) if (x.r !== "derived" && x.r) touch(x.r.datasetId, 1);
   for (const x of filters) if (x.r !== "derived" && x.r) touch(x.r.datasetId, 1);
   for (const x of selects) if (x.r !== "derived" && x.r) touch(x.r.datasetId, 1);
+  for (const x of comparisonRefs) if (x.r !== "derived" && x.r) touch(x.r.datasetId, 1);
+  for (const x of measureConditionRefs) if (x.r !== "derived" && x.r) touch(x.r.datasetId, 1);
   if (bucket?.r && bucket.r !== "derived") touch(bucket.r.datasetId, 1);
   if (corr?.x && corr.x !== "derived") touch(corr.x.datasetId, 3);
   if (corr?.y && corr.y !== "derived") touch(corr.y.datasetId, 3);
@@ -238,7 +276,7 @@ function compileOne(sel: Selection, model: SemanticModel, opts: CompileOptions):
   const droppedMeasures = measures.filter(({ m, r }) => isDroppedMeasure(m, r!)).map(({ m }) => `${m.fn}(${m.ref})`);
   const stillTouched = new Set<string>();
   for (const x of measures) if (x.r !== "derived" && x.r && !isDroppedMeasure(x.m, x.r)) stillTouched.add(x.r.datasetId);
-  for (const x of [...dimensions, ...filters, ...selects]) if (x.r !== "derived" && x.r) stillTouched.add(x.r.datasetId);
+  for (const x of [...dimensions, ...filters, ...selects, ...comparisonRefs, ...measureConditionRefs]) if (x.r !== "derived" && x.r) stillTouched.add(x.r.datasetId);
   if (bucket?.r && bucket.r !== "derived") stillTouched.add(bucket.r.datasetId);
   if (corr?.x && corr.x !== "derived") stillTouched.add(corr.x.datasetId);
   if (corr?.y && corr.y !== "derived") stillTouched.add(corr.y.datasetId);
@@ -258,6 +296,7 @@ function compileOne(sel: Selection, model: SemanticModel, opts: CompileOptions):
   const rels: RelationshipRecord[] = model.relationships;
   const joins: NonNullable<QueryPlan["joins"]> = [];
   const included = new Set([baseId]);
+  const withoutHops = new Map<string, number>();
   const targets = [...new Set([...stillTouched, ...withoutIds])].filter((id) => id !== baseId);
   for (const target of targets) {
     if (included.has(target)) continue;
@@ -267,9 +306,13 @@ function compileOne(sel: Selection, model: SemanticModel, opts: CompileOptions):
       if (p && (!best || p.length < best.length)) best = p;
     }
     if (!best) { notes.push(`No relationship connects ${nameOf(target)} to ${nameOf(baseId)}; its fields were dropped.`); continue; }
+    const towardsWithout = withoutIds.includes(target);
+    if (towardsWithout) withoutHops.set(target, best.length);
     for (const step of best) {
       if (included.has(step.datasetId)) continue;
-      const isWithout = withoutIds.includes(step.datasetId);
+      // Every hop on the way to an anti-joined table is a left join, or the
+      // intermediate inner join would already drop the rows being looked for.
+      const isWithout = withoutIds.includes(step.datasetId) || towardsWithout;
       joins.push({ datasetId: step.datasetId, leftOn: step.leftOn, rightOn: step.rightOn, type: isWithout ? "left" : "inner" });
       included.add(step.datasetId);
       notes.push(`Join: ${nameOf(step.datasetId)} on ${step.leftOn} = ${step.rightOn}${isWithout ? " (left — anti-join)" : ""}`);
@@ -318,9 +361,17 @@ function compileOne(sel: Selection, model: SemanticModel, opts: CompileOptions):
   }
 
   const outFilters: QueryFilter[] = [];
+  const multiHopWithout: { id: string; probeName: string }[] = [];
   for (const { f, r } of filters) {
     const col = nameOrDerived(r!, f.ref);
     if (!col) continue;
+    if (f.valueRef) {
+      const vr = resolve(f.valueRef, "filter comparison");
+      const other = vr ? nameOrDerived(vr, f.valueRef) : undefined;
+      if (!other) { notes.push(`Dropped filter on ${f.ref}: comparison field "${f.valueRef}" not found.`); continue; }
+      outFilters.push({ column: col, op: f.op, value: "", compareTo: other });
+      continue;
+    }
     outFilters.push({ column: col, op: f.op, value: f.value ?? "" });
   }
   // Anti-join: a left join leaves unmatched base rows with no joined columns
@@ -329,7 +380,12 @@ function compileOne(sel: Selection, model: SemanticModel, opts: CompileOptions):
     const j = joins.find((x) => x.datasetId === w);
     if (!j) continue;
     const probe = columnsOf(w).find((c) => c !== j.rightOn) ?? columnsOf(w)[0];
-    if (probe) outFilters.push({ column: nameFor.get(`${w}|${probe}`) ?? probe, op: "isNull", value: "" });
+    if (!probe) continue;
+    const probeName = nameFor.get(`${w}|${probe}`) ?? probe;
+    // Directly linked: rows with no partner carry a blank probe. Reached
+    // through an intermediate table, the grouped form below is used instead.
+    if ((withoutHops.get(w) ?? 1) <= 1) outFilters.push({ column: probeName, op: "isNull", value: "" });
+    else multiHopWithout.push({ id: w, probeName });
   }
   if (outFilters.length) plan.filters = outFilters;
 
@@ -346,17 +402,55 @@ function compileOne(sel: Selection, model: SemanticModel, opts: CompileOptions):
   for (const { m, r } of measures) {
     if (isDroppedMeasure(m, r!)) continue;
     const col = nameOrDerived(r!, m.ref);
-    if (col) aggregations.push({ column: col, fn: m.fn, as: m.as });
+    if (!col) continue;
+    const where: QueryFilter[] = [];
+    for (const f of m.where ?? []) {
+      const fr = resolve(f.ref, "measure condition");
+      const fcol = fr ? nameOrDerived(fr, f.ref) : undefined;
+      if (!fcol) { notes.push(`Dropped condition on ${f.ref} for ${m.fn}(${m.ref}): field not found.`); continue; }
+      if (f.valueRef) {
+        const vr = resolve(f.valueRef, "measure condition");
+        const other = vr ? nameOrDerived(vr, f.valueRef) : undefined;
+        if (other) where.push({ column: fcol, op: f.op, value: "", compareTo: other });
+      } else where.push({ column: fcol, op: f.op, value: f.value ?? "" });
+    }
+    aggregations.push({ column: col, fn: m.fn, as: m.as, ...(where.length ? { where } : {}) });
   }
   if (aggregations.length) plan.aggregations = aggregations;
 
   if (selects.length) plan.select = selects.map(({ s, r }) => nameOrDerived(r!, s)).filter((x): x is string => Boolean(x));
-  if (sel.having?.length) plan.having = sel.having;
-  if (sel.sort?.length) plan.sort = sel.sort;
+  // An anti-join through an intermediate table (a station's sensors'
+  // readings): an entity has no partner only when NONE of its intermediate
+  // rows do — group by the selected fields, count the far table, keep zero.
+  for (const { id, probeName } of multiHopWithout) {
+    const groupCols = plan.select?.length ? plan.select : plan.groupBy ?? [];
+    if (!groupCols.length) { plan.filters = [...(plan.filters ?? []), { column: probeName, op: "isNull", value: "" }]; continue; }
+    const alias = `${model.tables.find((t) => t.datasetId === id)?.alias ?? "linked"}_rows`;
+    plan.groupBy = groupCols;
+    plan.select = undefined;
+    plan.aggregations = [...(plan.aggregations ?? []), { column: probeName, fn: "count", as: alias }];
+    plan.having = [...(plan.having ?? []), { column: alias, op: "eq", value: 0 }];
+    notes.push(`Anti-join through an intermediate table: grouped by ${groupCols.join(", ")} and kept groups with ${alias} = 0.`);
+  }
+  // A sort or having may name a menu field ("alias.column") or an
+  // aggregate's "as" name; the former is resolved to the real column, the
+  // latter is kept as written. An unresolved sort silently sorted nothing.
+  const outputName = (ref: string) => {
+    const r = resolve(ref, "sort");
+    return r ? nameOrDerived(r, ref) ?? ref : ref;
+  };
+  if (sel.having?.length) plan.having = sel.having.map(({ valueRef, ...h }) => ({ ...h, column: outputName(h.column), ...(valueRef ? { compareTo: outputName(valueRef) } : {}) }));
+  if (sel.sort?.length) plan.sort = sel.sort.map((s) => ({ ...s, column: outputName(s.column) }));
   if (sel.limit != null) plan.limit = sel.limit;
-  if (corr?.x && corr?.y) {
-    const x = nameOrDerived(corr.x, sel.correlate!.x), y = nameOrDerived(corr.y, sel.correlate!.y);
+  // A correlate side is a menu field, a derived alias, or the "as" name of
+  // a measure ("correlate the two averages per person") — the last is what
+  // a per-entity correlation needs and is kept as written.
+  if (sel.correlate?.x && sel.correlate?.y) {
+    const measureAliases = new Set((sel.measures ?? []).map((m) => m.as).filter((a): a is string => Boolean(a)));
+    const side = (raw: string, r: Resolved | "derived" | undefined) => measureAliases.has(raw) ? raw : r ? nameOrDerived(r, raw) : undefined;
+    const x = side(sel.correlate.x, corr?.x), y = side(sel.correlate.y, corr?.y);
     if (x && y) plan.correlate = { columnX: x, columnY: y };
+    else notes.push(`Dropped correlate: "${sel.correlate.x}" / "${sel.correlate.y}" is neither a menu field nor a measure alias.`);
   }
   if (sel.chartType) plan.chartType = sel.chartType;
   if (sel.chartX) plan.chartX = sel.chartX;

@@ -50,7 +50,34 @@ export interface SemanticModel {
   measures: SemanticField[];
   dimensions: SemanticField[];
   relationships: RelationshipRecord[];
+  /** Long-format layouts found: a child table's generic value column whose meaning a parent column names. */
+  longFormats: LongFormat[];
+  /** Columns that grade a row's validity (a QC flag), with their values. */
+  qualityFlags: { datasetId: string; ref: string; column: string; values: string[] }[];
 }
+
+/**
+ * The "long" (entity–attribute–value) layout common to sensor, survey and
+ * lab exports: each row of the child holds ONE number in a generic
+ * `value` column, and WHICH quantity it is comes from a parent column such
+ * as `parameter` (with the unit beside it). "Average X" for a named
+ * quantity then means: filter the parent to X, aggregate the child's value.
+ */
+export interface LongFormat {
+  childId: string;
+  valueRef: string;
+  valueColumn: string;
+  parentId: string;
+  parameterRef: string;
+  parameterColumn: string;
+  parameterValues: string[];
+  unitRef?: string;
+}
+
+const GENERIC_VALUE = /^(value|values|reading|readings|measurement|measurements|result|results|observation|obs|val|amount|quantity_value)$/i;
+const UNIT_COLUMN = /^(unit|units|uom|unit_of_measure|measurement_unit)$/i;
+const PARAMETER_COLUMN = /(parameter|param|metric|variable|measure|analyte|pollutant|indicator|quantity|species|attribute|property|sensor_type|measurement_type)/i;
+const QUALITY_COLUMN = /(^|_)(quality|qc|qa|flag|flags|valid|validity|validated)(_|$)/i;
 
 export interface ModelableDataset {
   id: string;
@@ -112,9 +139,47 @@ export function buildSemanticModel(datasets: ModelableDataset[], relationships: 
       const label = parentDs?.columns.find((c) => c.type === "string" && c.isUnique && !relCols.get(parent)?.has(c.name));
       if (label) { dim.labelRef = `${aliasOf.get(parent)}.${label.name}`; break; }
     }
+    // A table's OWN primary key: its label is the same table's text column
+    // that is unique per row ("who are the top 3" wants names, not ids).
+    if (!dim.labelRef) {
+      const own = datasets.find((d) => d.id === dim.datasetId);
+      const keyCol = own?.columns.find((c) => c.name === dim.column);
+      const label = keyCol?.isUnique ? own?.columns.find((c) => c.type === "string" && c.isUnique && c.name !== dim.column && !relCols.get(dim.datasetId)?.has(c.name)) : undefined;
+      if (label) dim.labelRef = `${aliasOf.get(dim.datasetId)}.${label.name}`;
+    }
   }
 
-  return { tables, measures, dimensions, relationships };
+  // Long-format detection: child value column + parent parameter column.
+  const longFormats: LongFormat[] = [];
+  for (const m of measures) {
+    if (!GENERIC_VALUE.test(m.column)) continue;
+    for (const r of relationships) {
+      const childIsA = r.datasetIdA === m.datasetId && r.cardinality === "N:1";
+      const childIsB = r.datasetIdB === m.datasetId && r.cardinality === "1:N";
+      if (!childIsA && !childIsB) continue;
+      const parentId = childIsA ? r.datasetIdB : r.datasetIdA;
+      const parentDs = datasets.find((d) => d.id === parentId);
+      if (!parentDs) continue;
+      const unit = parentDs.columns.find((c) => UNIT_COLUMN.test(c.name));
+      // A column that also joins to a lookup (a list of parameters with
+      // their limits) is still the parameter column — only ids are excluded.
+      const cats = parentDs.columns.filter((c) => c.type === "string" && !c.isUnique && (c.distinctCount ?? Infinity) <= 30 && (c.distinctCount ?? 0) > 1 && !UNIT_COLUMN.test(c.name) && !/(^|_)(id|code|key)$/i.test(c.name));
+      const param = cats.find((c) => PARAMETER_COLUMN.test(c.name)) ?? (unit ? [...cats].sort((a, b) => (a.distinctCount ?? 0) - (b.distinctCount ?? 0))[0] : undefined);
+      if (!param) continue;
+      longFormats.push({
+        childId: m.datasetId, valueRef: m.ref, valueColumn: m.column,
+        parentId, parameterRef: `${aliasOf.get(parentId)}.${param.name}`, parameterColumn: param.name,
+        parameterValues: param.distinctValues ?? [],
+        unitRef: unit ? `${aliasOf.get(parentId)}.${unit.name}` : undefined,
+      });
+      break;
+    }
+  }
+  const qualityFlags = dimensions
+    .filter((d) => QUALITY_COLUMN.test(d.column) && (d.values?.length ?? 0) >= 2 && (d.values?.length ?? 0) <= 8)
+    .map((d) => ({ datasetId: d.datasetId, ref: d.ref, column: d.column, values: d.values ?? [] }));
+
+  return { tables, measures, dimensions, relationships, longFormats, qualityFlags };
 }
 
 /**
@@ -140,7 +205,11 @@ export function renderSemanticMenu(model: SemanticModel, focusIds?: Set<string>)
       ? `  values: ${d.values.join(" | ")}`
       : d.examples?.length ? `  e.g. ${d.examples.join(", ")}` : "";
     const label = d.labelRef ? `  (readable name: ${d.labelRef})` : "";
-    lines.push(`- ${d.ref} [${d.type}${d.isKey ? ", key" : ""}${d.distinctCount != null ? `, ${d.distinctCount} distinct` : ""}]${tail}${label}`);
+    const qc = model.qualityFlags.some((q) => q.ref === d.ref) ? "  (a data-quality flag: statistics should normally be filtered to the valid value)" : "";
+    lines.push(`- ${d.ref} [${d.type}${d.isKey ? ", key" : ""}${d.distinctCount != null ? `, ${d.distinctCount} distinct` : ""}]${tail}${label}${qc}`);
+  }
+  for (const lf of model.longFormats.filter((l) => inFocus(l.childId) || inFocus(l.parentId))) {
+    lines.push(`Note: ${lf.valueRef} holds whichever quantity ${lf.parameterRef} names${lf.unitRef ? ` (units in ${lf.unitRef})` : ""}. A question about one of those quantities (${lf.parameterValues.slice(0, 6).join(", ")}${lf.parameterValues.length > 6 ? ", …" : ""}) is answered by filtering ${lf.parameterRef} to it and aggregating ${lf.valueRef} — not by aggregating another numeric column of that table.`);
   }
   if (others.length) {
     lines.push("Other tables, not shown in full because the question doesn't appear to need them (use alias.column if one does):");

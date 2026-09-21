@@ -18,7 +18,7 @@ import { detectRelationships } from "../src/lib/relationships";
 import { linkSchema, unreachableLinkedColumns } from "../src/lib/schema-linking";
 import type { DatasetRecord } from "../src/lib/session-store";
 
-const DIR = path.resolve(__dirname, "../../test-data/validation-v2");
+const DIR = path.resolve(__dirname, "../test-data/validation-v2");
 const ds: DatasetRecord[] = [];
 for (const f of ["customers.csv", "subscriptions.csv"]) {
   const p = parseCSVBuffer(fs.readFileSync(path.join(DIR, f)));

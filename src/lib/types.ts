@@ -24,6 +24,35 @@ export interface ColumnSchema {
    * — "Lost" as well as "Returned" — instead of guessing from three samples.
    */
   distinctValues?: string[];
+  /** Smallest and largest value (numbers as numbers, dates as ISO strings) — for describing a column's range. */
+  min?: number | string;
+  max?: number | string;
+  /** For a date column written as dd/mm/yyyy or mm/dd/yyyy: which reading the whole column uses (decided from values that disambiguate it). */
+  dayOrder?: "dmy" | "mdy";
+  /**
+   * A missing-value code found in a numeric column (-999, -9999, 9999 …):
+   * a repeated all-nines value far outside the rest of the values. Cells
+   * holding it are loaded as blank, so it never enters an average.
+   */
+  sentinel?: number;
+  /** How many cells carried the sentinel. */
+  sentinelCount?: number;
+  /** The text formatting stripped to read this numeric column (currency sign, thousand separators, percent). */
+  numberFormat?: "currency" | "percent" | "thousands" | "parentheses" | "unit-words";
+  /** Cells that could not be read as a number in a numeric column (loaded as blank). */
+  unparsableCount?: number;
+}
+
+/**
+ * A detected link between two uploaded files, as shown to the user. A
+ * client-side projection of the server's RelationshipRecord.
+ */
+export interface DatasetLink {
+  datasetIdA: string;
+  datasetIdB: string;
+  columnA: string;
+  columnB: string;
+  cardinality?: "1:1" | "1:N" | "N:1" | "N:M";
 }
 
 export interface DatasetFile {
@@ -38,6 +67,10 @@ export interface DatasetFile {
   blobUrl?: string; // Vercel Blob URL after upload
   status: "uploading" | "processing" | "ready" | "error";
   errorMessage?: string;
+  /** Worksheet, for a workbook with several table sheets. */
+  sheetName?: string;
+  /** What the parser did to the file that the user should know about (e.g. a summary row excluded). */
+  notes?: string[];
 }
 
 export interface Session {
@@ -45,6 +78,8 @@ export interface Session {
   createdAt: Date;
   datasets: DatasetFile[];
   totalSize: number; // bytes
+  /** Links detected between the session's files (recomputed on every upload). */
+  links?: DatasetLink[];
 }
 
 // ─── Query & Results Types ────────────────────────────────────────────────────
@@ -102,6 +137,11 @@ export interface QueryResult {
   // repairs → joins → execution → explanation), for inspecting what actually
   // happened rather than only what came out.
   trace?: PipelineStep[];
+
+  /** Which path produced this result (absent on older results = deterministic). */
+  mode?: QueryMode;
+  /** RAG mode only: the model's own confidence in its answer. */
+  confidence?: "high" | "medium" | "low";
 
   /** Pandas equivalent of the executed plan — the same operations, as runnable code. */
   pandasCode?: string;
@@ -180,7 +220,7 @@ export interface ChartConfig {
 // which neither eq (one value) nor two eq filters (AND — matches nothing)
 // can express.
 export type FilterOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "contains" | "isNull" | "isNotNull" | "in" | "notIn";
-export type AggregateFn = "sum" | "avg" | "count" | "countDistinct" | "min" | "max";
+export type AggregateFn = "sum" | "avg" | "median" | "count" | "countDistinct" | "min" | "max";
 
 export interface QueryDerivedColumn {
   as: string;
@@ -192,12 +232,25 @@ export interface QueryFilter {
   column: string;
   op: FilterOp;
   value: string | number | boolean | (string | number)[];
+  /**
+   * Compare against ANOTHER column of the same (joined) row instead of a
+   * constant — "spend above its budget", "reading over its limit". When
+   * set, `value` is ignored.
+   */
+  compareTo?: string;
 }
 
 export interface QueryAggregation {
   column: string;
   fn: AggregateFn;
   as?: string;
+  /**
+   * Row conditions applied to THIS aggregate only ("count of readings above
+   * the limit" beside a plain count of readings; "average of value where
+   * parameter is X" beside the same for Y). The plan's own filters still
+   * apply to every aggregate.
+   */
+  where?: QueryFilter[];
 }
 
 export interface QuerySort {
@@ -268,9 +321,19 @@ export interface QueryRequest {
   sessionId: string;
   question: string;
   datasetIds: string[];
-  /** User-supplied OpenRouter API key (bring-your-own-key mode). Never persisted server-side. */
+  /** User-supplied API key (OpenRouter or Gemini, recognised by shape). Never persisted server-side. */
   apiKey?: string;
+  /**
+   * How the question is answered. "deterministic" (default): the model
+   * writes a plan, the engine executes it, every number is computed.
+   * "rag": the rows and statistics most relevant to the question are
+   * retrieved and the model answers from them directly — faster and more
+   * flexible, but unverified.
+   */
+  mode?: QueryMode;
 }
+
+export type QueryMode = "deterministic" | "rag";
 
 export interface QueryResponse {
   result: QueryResult;

@@ -14,6 +14,10 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-green"></a>
 </p>
 
+## Architecture
+
+<p align="center"><img src="architecture.png" alt="DataLens architecture: upload → parse, clean, profile, link → Blob; question → schema linking → LLM plan → compile, validate, answer-check → deterministic execution → table, chart, explanation" width="100%"></p>
+
 ## Run locally
 
 Needs Node.js 20+ and git.

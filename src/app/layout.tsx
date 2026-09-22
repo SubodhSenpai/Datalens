@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Baloo_2, Plus_Jakarta_Sans } from "next/font/google";
 import StructuredData from "@/components/StructuredData";
-import { SITE_URL, SITE_NAME, SITE_TAGLINE, SITE_DESCRIPTION, KEYWORDS } from "@/lib/site";
+import { SITE_URL, SITE_NAME, SITE_TAGLINE, SITE_DESCRIPTION, KEYWORDS, ORG_NAME } from "@/lib/site";
 import "./globals.css";
 
 const baloo = Baloo_2({ subsets: ["latin"], weight: ["600", "700", "800"], variable: "--font-baloo" });
@@ -14,6 +14,7 @@ export const metadata: Metadata = {
   keywords: KEYWORDS,
   applicationName: SITE_NAME,
   category: "technology",
+  publisher: ORG_NAME,
   alternates: { canonical: "/" },
   robots: { index: true, follow: true, googleBot: { index: true, follow: true, "max-snippet": -1, "max-image-preview": "large" } },
   openGraph: {

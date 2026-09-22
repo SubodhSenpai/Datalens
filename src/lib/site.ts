@@ -7,6 +7,7 @@ export const SITE_TAGLINE = "Ask your CSV and Excel files anything";
 export const SITE_DESCRIPTION =
   "Upload CSV or Excel files, ask a question in plain English and get a computed table, a chart and an explanation — across several files, with free open-source models. Every answer shows the plan it ran.";
 export const REPO_URL = "https://github.com/SubodhSenpai/Datalens";
+export const ORG_NAME = "Konika Systems Private Limited";
 
 export const KEYWORDS = [
   "ask questions about CSV file",

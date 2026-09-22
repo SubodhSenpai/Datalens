@@ -7,6 +7,7 @@ import {
   Upload, Database, BarChart3, FileSpreadsheet,
   ArrowRight, CheckCircle2, Sparkles,
 } from "lucide-react";
+import { ORG_NAME } from "@/lib/site";
 
 const FEATURES = [
   { icon: <Upload size={22} />, title: "Any spreadsheet", bg: "bg-mint" },
@@ -126,6 +127,7 @@ export default function HomePage() {
       <footer className="border-t-2 border-ink py-6 px-6">
         <div className="max-w-5xl mx-auto flex items-center justify-between text-xs text-text-secondary font-semibold">
           <span>DataLens</span>
+          <span>Co-powered by {ORG_NAME}</span>
         </div>
       </footer>
     </main>

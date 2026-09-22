@@ -1,4 +1,4 @@
-import { SITE_URL, SITE_NAME, SITE_DESCRIPTION, REPO_URL } from "@/lib/site";
+import { SITE_URL, SITE_NAME, SITE_DESCRIPTION, REPO_URL, ORG_NAME } from "@/lib/site";
 
 // JSON-LD for search and answer engines: what the site is and what it does.
 // No FAQPage node: rich results require the answers to be visible on the
@@ -29,6 +29,7 @@ export default function StructuredData() {
         offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
         license: "https://opensource.org/license/mit",
         codeRepository: REPO_URL,
+        creator: { "@type": "Organization", name: ORG_NAME },
         image: `${SITE_URL}/opengraph-image`,
         featureList: [
           "Ask questions about CSV and Excel files in plain English",

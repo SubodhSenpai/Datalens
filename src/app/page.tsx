@@ -7,7 +7,8 @@ import {
   Upload, Database, BarChart3, FileSpreadsheet,
   ArrowRight, CheckCircle2, Sparkles,
 } from "lucide-react";
-import { ORG_NAME } from "@/lib/site";
+import { ORG_NAME, REPO_URL } from "@/lib/site";
+import GithubIcon from "@/components/GithubIcon";
 
 const FEATURES = [
   { icon: <Upload size={22} />, title: "Any spreadsheet", bg: "bg-mint" },
@@ -51,9 +52,14 @@ export default function HomePage() {
             </div>
             <span className="text-xl font-display font-bold tracking-tight">DataLens</span>
           </Link>
-          <button id="nav-launch-btn" className="btn-primary text-sm" onClick={() => router.push("/dashboard")}>
-            Try free <ArrowRight size={14} />
-          </button>
+          <div className="flex items-center gap-3">
+            <a href={REPO_URL} aria-label="Source on GitHub" title="Source on GitHub" rel="noopener" className="w-9 h-9 rounded-full bg-bg-card border-2 border-ink flex items-center justify-center shadow-hard-sm hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-hard transition-all">
+              <GithubIcon size={17} />
+            </a>
+            <button id="nav-launch-btn" className="btn-primary text-sm" onClick={() => router.push("/dashboard")}>
+              Try free <ArrowRight size={14} />
+            </button>
+          </div>
         </div>
       </nav>
 

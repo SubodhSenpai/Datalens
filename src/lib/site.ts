@@ -49,7 +49,7 @@ export const FAQS: Faq[] = [
   },
   {
     q: "How accurate are the answers?",
-    a: "Numbers are computed by code, not by the model. On three generated validation sets with known answers, DataLens scored 33 of 33 single-file and 51 of 60 cross-file questions exactly, and each answer shows the plan it ran.",
+    a: "Numbers are computed by code, not by the model, so they are exact for the plan that ran — and that plan, every correction and the joins used are shown with each answer, so a wrong reading can be traced rather than trusted.",
   },
   {
     q: "Is DataLens free and open source?",

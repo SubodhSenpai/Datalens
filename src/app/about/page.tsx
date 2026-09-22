@@ -1,11 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Sparkles, ArrowRight, Code2 } from "lucide-react";
+import GithubIcon from "@/components/GithubIcon";
 import { SITE_URL, SITE_NAME, SITE_DESCRIPTION, REPO_URL, ORG_NAME, FAQS, HOW_IT_WORKS } from "@/lib/site";
 
 // The landing page is deliberately text-light. This page carries the text
 // that search and answer engines read: a definition, the steps, what is
-// handled, measured accuracy and a visible FAQ mirrored in JSON-LD.
+// handled and a visible FAQ mirrored in JSON-LD.
 
 export const metadata: Metadata = {
   title: "About — ask CSV and Excel files anything",
@@ -23,11 +24,6 @@ const HANDLES = [
   ["Sensor and long-format data", "parameter / value / unit tables and quality flags recognised as such"],
 ];
 
-const VALIDATION = [
-  ["HR & sales", "12 files", "11 / 11", "13 / 15"],
-  ["SaaS billing", "4 files, 6 tables", "11 / 11", "18 / 21"],
-  ["Environmental sensors", "32k readings", "11 / 11", "20 / 24"],
-];
 
 export default function AboutPage() {
   const faqJsonLd = {
@@ -61,9 +57,14 @@ export default function AboutPage() {
             </div>
             <span className="text-xl font-display font-bold tracking-tight">{SITE_NAME}</span>
           </Link>
-          <Link href="/dashboard" className="btn-primary text-sm">
-            Try free <ArrowRight size={14} />
-          </Link>
+          <div className="flex items-center gap-3">
+            <a href={REPO_URL} aria-label="Source on GitHub" title="Source on GitHub" rel="noopener" className="w-9 h-9 rounded-full bg-bg-card border-2 border-ink flex items-center justify-center shadow-hard-sm hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-hard transition-all">
+              <GithubIcon size={17} />
+            </a>
+            <Link href="/dashboard" className="btn-primary text-sm">
+              Try free <ArrowRight size={14} />
+            </Link>
+          </div>
         </div>
       </nav>
 
@@ -112,32 +113,6 @@ export default function AboutPage() {
             </dl>
           </section>
 
-          {/* ── Accuracy ── */}
-          <section aria-labelledby="accuracy">
-            <h2 id="accuracy" className="font-display text-2xl font-extrabold mb-3">How accurate is it?</h2>
-            <p className="text-sm text-text-secondary leading-relaxed mb-5">
-              Numbers are computed by code, never by the model. Three generated data sets with computed answer keys, graded strictly — the value must match:
-            </p>
-            <div className="glass-card overflow-hidden">
-              <table className="w-full text-sm">
-                <thead className="bg-mint border-b-2 border-ink">
-                  <tr className="text-left font-display">
-                    <th className="px-4 py-3">Data set</th><th className="px-4 py-3">Size</th><th className="px-4 py-3">Single-file</th><th className="px-4 py-3">Cross-file</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {VALIDATION.map(([name, size, single, cross]) => (
-                    <tr key={name} className="border-b border-ink/15 last:border-0">
-                      <td className="px-4 py-3 font-semibold">{name}</td><td className="px-4 py-3 text-text-secondary">{size}</td><td className="px-4 py-3">{single}</td><td className="px-4 py-3">{cross}</td>
-                    </tr>
-                  ))}
-                  <tr className="bg-bg-surface font-bold">
-                    <td className="px-4 py-3" colSpan={2}>Total</td><td className="px-4 py-3">33 / 33</td><td className="px-4 py-3">51 / 60 (85 %)</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
 
           {/* ── FAQ — visible twin of the FAQPage JSON-LD above ── */}
           <section aria-labelledby="faq">

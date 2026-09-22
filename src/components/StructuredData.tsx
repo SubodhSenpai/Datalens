@@ -29,7 +29,7 @@ export default function StructuredData() {
         offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
         license: "https://opensource.org/license/mit",
         codeRepository: REPO_URL,
-        creator: { "@type": "Organization", name: ORG_NAME },
+        creator: { "@id": `${SITE_URL}/#org` },
         image: `${SITE_URL}/opengraph-image`,
         featureList: [
           "Ask questions about CSV and Excel files in plain English",
@@ -39,6 +39,23 @@ export default function StructuredData() {
           "Free open-source models via OpenRouter or Google Gemini",
           "Full query plan and trace shown with every answer",
         ],
+      },
+      {
+        "@type": "Organization",
+        "@id": `${SITE_URL}/#org`,
+        name: ORG_NAME,
+        url: SITE_URL,
+        sameAs: [REPO_URL],
+      },
+      {
+        "@type": "SoftwareSourceCode",
+        "@id": `${REPO_URL}#code`,
+        name: `${SITE_NAME} source`,
+        codeRepository: REPO_URL,
+        programmingLanguage: "TypeScript",
+        runtimePlatform: "Next.js",
+        license: "https://opensource.org/license/mit",
+        targetProduct: { "@id": `${SITE_URL}/#app` },
       },
     ],
   };

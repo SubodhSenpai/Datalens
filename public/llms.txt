@@ -3,6 +3,7 @@
 > Ask CSV and Excel files anything in plain English. A language model plans the query; a deterministic engine computes the table, chart and explanation and shows the full trace. Free, open source (MIT), runs on free open-source models.
 
 Site: https://datalens-six-rouge.vercel.app
+About (full description, accuracy, FAQ): https://datalens-six-rouge.vercel.app/about
 Source: https://github.com/SubodhSenpai/Datalens
 
 ## What it does

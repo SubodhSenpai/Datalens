@@ -45,7 +45,7 @@ export default function HomePage() {
 
       {/* ── NAV ── */}
       <nav className="sticky top-0 z-50 bg-bg-base/90 backdrop-blur-sm border-b-2 border-ink">
-        <div className="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">
+        <div className="px-6 h-16 flex items-center justify-between">
           <Link href="/" className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-full bg-mustard border-2 border-ink flex items-center justify-center">
               <Sparkles size={15} />

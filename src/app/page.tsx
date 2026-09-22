@@ -125,7 +125,7 @@ export default function HomePage() {
 
       {/* ── FOOTER ── */}
       <footer className="border-t-2 border-ink py-6 px-6">
-        <div className="max-w-5xl mx-auto flex items-center justify-between text-xs text-text-secondary font-semibold">
+        <div className="flex items-center justify-between text-xs text-text-secondary font-semibold">
           <span className="flex items-center gap-3"><span>DataLens</span><Link href="/about" className="underline underline-offset-2 hover:text-ink">About</Link></span>
           <span>Co-powered by {ORG_NAME}</span>
         </div>

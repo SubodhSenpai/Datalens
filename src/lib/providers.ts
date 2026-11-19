@@ -54,15 +54,18 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     id: "gemini",
     label: "Google Gemini",
     baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
-    // Newest flash model first; older ones as fallback when the newest is
-    // under high demand (503) or retired for new keys (404).
+    // Newest flash model first. The lite models come next, before the older
+    // flash ones: when the full flash models are overloaded they tend to
+    // hang together (observed: 3.5–3.8 flash all timing out on a one-line
+    // prompt while every lite model answered in 2–4s), so falling back
+    // flash → older flash only burns the time budget.
     models: [
       "gemini-3.8-flash",
+      "gemini-3.5-flash-lite",
+      "gemini-3.1-flash-lite",
       "gemini-3.7-flash",
       "gemini-3.6-flash",
       "gemini-3.5-flash",
-      "gemini-3.5-flash-lite",
-      "gemini-3.1-flash-lite",
     ],
     keyHint: "AIza… or AQ.…",
     keysUrl: "https://aistudio.google.com/apikey",

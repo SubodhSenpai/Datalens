@@ -155,6 +155,13 @@ const EXHAUSTED_TTL_MS = 60 * 60 * 1000;
 // that just failed that way is skipped for the next requests instead of
 // being re-tried with backoff by every question in the meantime.
 const CONGESTED_TTL_MS = 90 * 1000;
+// A model that hung for the full request timeout usually keeps hanging;
+// skip it for a while so every question doesn't pay that wait again.
+const HUNG_TTL_MS = 10 * 60 * 1000;
+function isTimeout(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /timed? ?out|timeout/i.test(msg);
+}
 // Wall-clock budget for one planner call across the whole model/key chain.
 // Without it, 4 keys × 4 models × backoff retries turned a single question
 // into a five-minute wait that the client gave up on.
@@ -194,6 +201,7 @@ async function completeJson(
       } catch (err) {
         lastErr = err;
         if (isDailyCap(err) || isModelUnavailable(err)) exhaustedUntil.set(k, Date.now() + EXHAUSTED_TTL_MS);
+        else if (isTimeout(err)) exhaustedUntil.set(k, Date.now() + HUNG_TTL_MS);
         else if (isRateLimited(err) || isCapacityError(err)) exhaustedUntil.set(k, Date.now() + CONGESTED_TTL_MS);
         // Only move on to the next key/model for capacity-related failures
         // (rate limit, out of credits/capacity) — anything else (bad

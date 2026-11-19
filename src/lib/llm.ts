@@ -161,7 +161,8 @@ const CONGESTED_TTL_MS = 90 * 1000;
 const CHAIN_BUDGET_MS = 100 * 1000;
 // One request that hangs is treated like congestion: give up on it and let
 // the chain try the next model, well inside the chain budget.
-const REQUEST_TIMEOUT_MS = 45 * 1000;
+// 30s leaves room for about three models inside CHAIN_BUDGET_MS.
+const REQUEST_TIMEOUT_MS = 30 * 1000;
 const exhaustedUntil = new Map<string, number>();
 const exhaustedKey = (model: string, client: OpenAI) => `${model}|${client.apiKey.slice(-8)}`;
 
@@ -217,7 +218,9 @@ function isModelUnavailable(err: unknown): boolean {
 
 function isCapacityError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /402|503|insufficient credits|no.*instances|not available|high demand|overloaded|UNAVAILABLE/i.test(msg);
+  // A timed-out request is a slow/overloaded model, not a bad request — the
+  // next (often lighter) model in the chain may well answer in time.
+  return /402|503|insufficient credits|no.*instances|not available|high demand|overloaded|UNAVAILABLE|timed? ?out|timeout/i.test(msg);
 }
 
 interface Completion {

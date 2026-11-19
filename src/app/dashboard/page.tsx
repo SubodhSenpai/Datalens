@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useSyncExternalStore } from "react";
+import { useState, useCallback, useSyncExternalStore, useRef } from "react";
 import Link from "next/link";
 import { Sparkles, Plus, ChevronRight } from "lucide-react";
 import FileUpload from "@/components/FileUpload";
@@ -56,6 +56,8 @@ export default function DashboardPage() {
   const [showUpload, setShowUpload] = useState(false);
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState(() => loadStoredApiKey());
+  // Original uploaded files by name, so they can be re-sent if the server forgets them.
+  const sourceFilesRef = useRef<Map<string, File>>(new Map());
   const sidebarWidth = useSyncExternalStore(subscribeSidebar, readSidebarWidth, () => SIDEBAR_DEFAULT);
 
   const startSidebarResize = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -80,7 +82,8 @@ export default function DashboardPage() {
 
   const resetSidebarWidth = useCallback(() => writeSidebarWidth(SIDEBAR_DEFAULT, true), []);
 
-  const handleFilesUploaded = useCallback((newDatasets: DatasetFile[], links: DatasetLink[]) => {
+  const handleFilesUploaded = useCallback((newDatasets: DatasetFile[], links: DatasetLink[], files: File[] = []) => {
+    for (const f of files) sourceFilesRef.current.set(f.name, f);
     setSession(prev => {
       if (!prev) return prev;
       const combined = [...prev.datasets, ...newDatasets];
@@ -97,7 +100,31 @@ export default function DashboardPage() {
       const links = (prev.links ?? []).filter(l => l.datasetIdA !== id && l.datasetIdB !== id);
       return { ...prev, datasets, links, totalSize: datasets.reduce((a, d) => a + d.size, 0) };
     });
+    const removed = session?.datasets.find(d => d.id === id);
+    if (removed && !session?.datasets.some(d => d.id !== id && d.name.split(" — ")[0] === removed.name.split(" — ")[0])) {
+      sourceFilesRef.current.delete(removed.name.split(" — ")[0]);
+    }
     if (session) fetch(`/api/dataset/${id}?sessionId=${encodeURIComponent(session.id)}`, { method: "DELETE" });
+  }, [session]);
+
+  // Re-sends every kept original file to the server and replaces the
+  // session's dataset list with what comes back (new ids). Returns null if
+  // there is nothing to re-send or the upload fails.
+  const reuploadAll = useCallback(async (): Promise<DatasetFile[] | null> => {
+    if (!session || sourceFilesRef.current.size === 0) return null;
+    const form = new FormData();
+    form.set("sessionId", session.id);
+    for (const f of sourceFilesRef.current.values()) form.append("files", f);
+    const res = await fetch("/api/upload", { method: "POST", body: form });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const datasets: DatasetFile[] = (data.datasets ?? []).map((d: DatasetFile) => ({ ...d, uploadedAt: new Date(d.uploadedAt) }));
+    if (datasets.length === 0) return null;
+    setSession(prev => prev && ({
+      ...prev, datasets, links: (data.links ?? []) as DatasetLink[],
+      totalSize: datasets.reduce((a, d) => a + d.size, 0),
+    }));
+    return datasets;
   }, [session]);
 
   const handleQuery = useCallback(async (question: string, selectedIds: string[], mode: QueryMode = "deterministic") => {
@@ -108,12 +135,30 @@ export default function DashboardPage() {
     setActiveQueryId(queryId);
     setIsQuerying(true);
     try {
-      const res = await fetch("/api/query", {
+      const send = (ids: string[]) => fetch("/api/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: session.id, question, datasetIds: selectedIds, apiKey: apiKey || undefined, mode }),
+        body: JSON.stringify({ sessionId: session.id, question, datasetIds: ids, apiKey: apiKey || undefined, mode }),
       });
-      if (!res.ok) throw new Error(`API error: ${res.status}`);
+      let res = await send(selectedIds);
+      if (!res.ok) {
+        const body = await res.clone().json().catch(() => ({}));
+        // Without Blob storage the server keeps files in memory only, so a
+        // restart (or a different serverless instance) forgets them while
+        // this page still lists them. Re-upload the originals and retry once.
+        if (body?.code === "session_lost") {
+          const recovered = await reuploadAll();
+          if (recovered) {
+            const selectedNames = new Set(session.datasets.filter(d => selectedIds.includes(d.id)).map(d => d.name));
+            const ids = recovered.filter(d => selectedNames.has(d.name)).map(d => d.id);
+            res = await send(ids.length ? ids : recovered.map(d => d.id));
+          }
+        }
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.error ? `${body.error} (${res.status})` : `API error: ${res.status}`);
+      }
       const data = await res.json();
       setQueries(prev => prev.map(q => q.id === queryId ? { ...q, ...data.result } : q));
     } catch (err) {
@@ -122,7 +167,7 @@ export default function DashboardPage() {
     } finally {
       setIsQuerying(false);
     }
-  }, [session, apiKey]);
+  }, [session, apiKey, reuploadAll]);
 
   const hasDatasets = (session?.datasets.length ?? 0) > 0;
 

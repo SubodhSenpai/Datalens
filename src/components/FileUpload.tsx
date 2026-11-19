@@ -19,7 +19,8 @@ interface FileUploadProps {
   sessionId: string;
   existingCount: number;
   existingSize: number;
-  onUploaded: (datasets: DatasetFile[], links: DatasetLink[]) => void;
+  /** `files` are the originals, kept by the caller so it can re-upload them if the server loses the session. */
+  onUploaded: (datasets: DatasetFile[], links: DatasetLink[], files: File[]) => void;
   onCancel: () => void;
   inline?: boolean;
 }
@@ -114,7 +115,7 @@ export default function FileUpload({ sessionId, existingCount, existingSize, onU
         setPendingFiles([]);
       }
 
-      if (uploaded.length > 0) onUploaded(uploaded, (data.links ?? []) as DatasetLink[]);
+      if (uploaded.length > 0) onUploaded(uploaded, (data.links ?? []) as DatasetLink[], ready.map((p) => p.file));
     } catch {
       setSubmitError("Upload failed. Check your connection and try again.");
     } finally {

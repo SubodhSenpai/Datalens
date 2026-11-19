@@ -78,7 +78,7 @@ export async function POST(req: NextRequest) {
 
   const session = await getSession(sessionId);
   if (!session) {
-    return NextResponse.json({ error: "Session not found or expired" }, { status: 404 });
+    return NextResponse.json({ error: "Session not found or expired", code: "session_lost" }, { status: 404 });
   }
 
   const selected = datasetIds
@@ -86,7 +86,7 @@ export async function POST(req: NextRequest) {
     .filter((d): d is NonNullable<typeof d> => !!d);
 
   if (selected.length === 0) {
-    return NextResponse.json({ error: "None of the selected datasets exist in this session" }, { status: 400 });
+    return NextResponse.json({ error: "None of the selected datasets exist in this session", code: "session_lost" }, { status: 400 });
   }
 
   const queryId = "r_" + Math.random().toString(36).substring(2);

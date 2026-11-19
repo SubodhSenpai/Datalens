@@ -1,11 +1,12 @@
 import type { Metadata, Viewport } from "next";
-import { Baloo_2, Plus_Jakarta_Sans } from "next/font/google";
 import StructuredData from "@/components/StructuredData";
 import { SITE_URL, SITE_NAME, SITE_TAGLINE, SITE_DESCRIPTION, KEYWORDS, ORG_NAME } from "@/lib/site";
 import "./globals.css";
 
-const baloo = Baloo_2({ subsets: ["latin"], weight: ["600", "700", "800"], variable: "--font-baloo" });
-const jakarta = Plus_Jakarta_Sans({ subsets: ["latin"], weight: ["400", "500", "600", "700"], variable: "--font-jakarta" });
+// Fonts are self-hosted from public/fonts (declared in globals.css) rather
+// than loaded with next/font/google, which downloads them from Google on
+// every build and was failing on Vercel's build machines ("next/font/google
+// queries have exactly one entry"). No network access is needed to build.
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
@@ -42,8 +43,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`${baloo.variable} ${jakarta.variable}`}>
+    <html lang="en">
       <head>
+        <link rel="preload" href="/fonts/plus-jakarta-sans-latin.woff2" as="font" type="font/woff2" crossOrigin="" />
+        <link rel="preload" href="/fonts/baloo2-latin.woff2" as="font" type="font/woff2" crossOrigin="" />
         <StructuredData />
       </head>
       <body>{children}</body>
